@@ -1,0 +1,111 @@
+# =============================
+# Visual Studio & .NET Ignore Rules
+# =============================
+
+# Build Folders
+bin/
+obj/
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Mono auto-generated files
+mono_crash.*
+
+# Windows image file caches
+Thumbs.db
+ehthumbs.db
+
+# Folder config file
+Desktop.ini
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Windows Installer files
+*.cab
+*.msi
+*.msm
+*.msp
+
+# Windows shortcuts
+*.lnk
+
+# Rider project files
+.idea/
+*.sln.iml
+
+# Visual Studio Code workspace and settings
+.vscode/
+
+# Visual Studio specific files
+.vs/
+*.pidb
+# Removed *.sln to allow solution files to be tracked
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# NuGet Packages
+*.nupkg
+*.snupkg
+# Include if NuGet packages should be ignored globally across all projects.
+**/packages/
+# Uncomment if necessary; generally, packages are restored automatically by MSBuild
+# *.nuget/packages/
+
+# Entity Framework Migrations
+Migrations/
+
+# SQL Server files
+*.mdf
+*.ldf
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+Icon?
+._*
+Thumbs.db
+ehthumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Compiled files
+*.dll
+*.exe
+*.pdb
+*.cache
+*.ilk
+*.meta
+
+# Others
+*.vspscc
+*.vssscc
+*.scc
+
+# Rider specific
+.idea/
+*.sln.iml
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# Resharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
