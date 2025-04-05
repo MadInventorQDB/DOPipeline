@@ -5,14 +5,15 @@ using DOPipeline.Utilities;
 using DifferentialBackup.Components;
 using DifferentialBackup.Utilities;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 
 namespace DifferentialBackup.Systems
 {
     public class HashCalculationSystem : ISystem
     {
-        private readonly Dictionary<string, string> _fileHashes;
+        private readonly ConcurrentDictionary<string, string> _fileHashes;
 
-        public HashCalculationSystem(Dictionary<string, string> fileHashes)
+        public HashCalculationSystem(ConcurrentDictionary<string, string> fileHashes)
         {
             _fileHashes = fileHashes;
         }

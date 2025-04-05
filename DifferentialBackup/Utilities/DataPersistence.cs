@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -7,17 +8,17 @@ namespace DifferentialBackup.Utilities
 {
     public static class DataPersistence
     {
-        public static Dictionary<string, string> LoadFileHashes(string filePath)
+        public static ConcurrentDictionary<string, string> LoadFileHashes(string filePath)
         {
             if (File.Exists(filePath))
             {
                 var json = File.ReadAllText(filePath);
-                return JsonSerializer.Deserialize<Dictionary<string, string>>(json) ?? new Dictionary<string, string>();
+                return JsonSerializer.Deserialize<ConcurrentDictionary<string, string>>(json) ?? new ConcurrentDictionary<string, string>();
             }
-            return new Dictionary<string, string>();
+            return new ConcurrentDictionary<string, string>();
         }
 
-        public static void SaveFileHashes(Dictionary<string, string> fileHashes, string filePath)
+        public static void SaveFileHashes(ConcurrentDictionary<string, string> fileHashes, string filePath)
         {
             var json = JsonSerializer.Serialize(fileHashes);
             File.WriteAllText(filePath, json);

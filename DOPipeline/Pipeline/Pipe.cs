@@ -28,7 +28,7 @@ namespace DOPipeline.Pipeline
         {
             foreach (var system in _systems)
             {
-                foreach (var entity in entities)
+                Parallel.ForEach(entities, entity =>
                 {
                     var result = system.Execute(entity, storage);
                     if (!result.IsSuccess)
@@ -38,8 +38,9 @@ namespace DOPipeline.Pipeline
                             ErrorMessage = result.ErrorMessage
                         });
                     }
-                }
+                });
             }
+
             return Result.Success();
         }
     }

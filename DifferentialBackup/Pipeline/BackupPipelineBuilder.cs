@@ -3,7 +3,8 @@ using DOPipeline.Logging; // <-- Added using
 using DOPipeline.Pipeline;
 using DifferentialBackup.Systems;
 using System; // Added for DateTime, HashSet
-using System.Collections.Generic; // Added for Dictionary
+using System.Collections.Generic;
+using System.Collections.Concurrent; // Added for Dictionary
 
 namespace DifferentialBackup.Pipeline
 {
@@ -24,7 +25,7 @@ namespace DifferentialBackup.Pipeline
         public static DOPipeline.Pipeline.Pipeline BuildBackupPipeline(
             string sourceDirectory,
             string backupDestination,
-            Dictionary<string, string> fileHashes,
+            ConcurrentDictionary<string, string> fileHashes,
             HashSet<DateTime> backupDates,
             IPipelineLogger logger) // <-- Added logger parameter
         {

@@ -1,12 +1,13 @@
 using System.Collections.Generic;
 using DOPipeline.Entities;
 using DOPipeline.Components;
+using System.Collections.Concurrent;
 
 namespace DOPipeline.Storage
 {
     public class ComponentStorage : IComponentStorage
     {
-        private readonly Dictionary<Entity, Dictionary<Type, IComponent>> _storage = new();
+        private readonly ConcurrentDictionary<Entity, ConcurrentDictionary<Type, IComponent>> _storage = new();
 
         public T GetComponent<T>(Entity entity) where T : class, IComponent
         {
@@ -22,7 +23,7 @@ namespace DOPipeline.Storage
         {
             if (!_storage.ContainsKey(entity))
             {
-                _storage[entity] = new Dictionary<Type, IComponent>();
+                _storage[entity] = new ConcurrentDictionary<Type, IComponent>();
             }
             _storage[entity][typeof(T)] = component;
         }

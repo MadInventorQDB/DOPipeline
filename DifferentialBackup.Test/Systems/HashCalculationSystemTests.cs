@@ -7,6 +7,7 @@ using DifferentialBackup.Components;
 using System.Collections.Generic;
 using System.IO;
 using DifferentialBackup.Utilities;
+using System.Collections.Concurrent;
 
 namespace DifferentialBackup.Test.Systems
 {
@@ -18,7 +19,7 @@ namespace DifferentialBackup.Test.Systems
             var tempFile = Path.Combine(Path.GetTempPath(), "testfile.txt");
             File.WriteAllText(tempFile, "Test Content");
 
-            var fileHashes = new Dictionary<string, string>();
+            var fileHashes = new ConcurrentDictionary<string, string>();
             var system = new HashCalculationSystem(fileHashes);
 
             var entity = new Entity();
@@ -39,7 +40,7 @@ namespace DifferentialBackup.Test.Systems
         [Fact]
         public void Execute_FilePathComponentMissing_ReturnsFailure()
         {
-            var fileHashes = new Dictionary<string, string>();
+            var fileHashes = new ConcurrentDictionary<string, string>();
             var system = new HashCalculationSystem(fileHashes);
 
             var entity = new Entity();

@@ -12,7 +12,8 @@ using System;
 using DOPipeline.Logging;
 using DifferentialBackup.Utilities;
 //using System.Threading; // --- REMOVED ---
-using System.Globalization; // <-- Added for DateTime parsing
+using System.Globalization;
+using System.Collections.Concurrent; // <-- Added for DateTime parsing
 
 namespace DifferentialBackup.Test.Pipeline
 {
@@ -45,7 +46,8 @@ namespace DifferentialBackup.Test.Pipeline
         [Fact]
         public void BuildBackupPipeline_CreatesPipelineWithCorrectNumberOfPipes()
         {
-            var fileHashes = new Dictionary<string, string>(); var backupDates = new HashSet<System.DateTime>();
+            var fileHashes = new ConcurrentDictionary<string, string>(); 
+            var backupDates = new HashSet<System.DateTime>();
             var pipeline = BackupPipelineBuilder.BuildBackupPipeline(_sourceDirectory, _backupDestination, fileHashes, backupDates, _logger);
             Assert.NotNull(pipeline); var pipesField = typeof(DOPipeline.Pipeline.Pipeline).GetField("_pipes", BindingFlags.NonPublic | BindingFlags.Instance); Assert.NotNull(pipesField); var pipes = pipesField.GetValue(pipeline) as List<DOPipeline.Pipeline.Pipe>; Assert.NotNull(pipes); Assert.Equal(4, pipes.Count);
         }
@@ -56,7 +58,7 @@ namespace DifferentialBackup.Test.Pipeline
             // --- Arrange: Common Setup ---
             var sourceFile = Path.Combine(_sourceDirectory, "file1.txt");
             File.WriteAllText(sourceFile, "Initial Content");
-            var fileHashes = new Dictionary<string, string>(); // Persisted state
+            var fileHashes = new ConcurrentDictionary<string, string>(); // Persisted state
             var backupDates = new HashSet<System.DateTime>(); // Persisted state
             var pipeline = BackupPipelineBuilder.BuildBackupPipeline(_sourceDirectory, _backupDestination, fileHashes, backupDates, _logger);
 
@@ -147,7 +149,7 @@ namespace DifferentialBackup.Test.Pipeline
             // Arrange
             var sourceFile = Path.Combine(_sourceDirectory, "file_unchanged.txt");
             File.WriteAllText(sourceFile, "Stable Content");
-            var fileHashes = new Dictionary<string, string>();
+            var fileHashes = new ConcurrentDictionary<string, string>();
             var backupDates = new HashSet<System.DateTime>();
             var pipeline = BackupPipelineBuilder.BuildBackupPipeline(_sourceDirectory, _backupDestination, fileHashes, backupDates, _logger);
             var storage = new ComponentStorage();

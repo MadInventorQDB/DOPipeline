@@ -6,6 +6,7 @@ using DOPipeline.Storage;
 using DifferentialBackup.Components;
 using System.Collections.Generic;
 using System;
+using System.Collections.Concurrent;
 
 namespace DifferentialBackup.Test.Systems
 {
@@ -14,7 +15,7 @@ namespace DifferentialBackup.Test.Systems
         [Fact]
         public void Execute_NewFile_AddsBackupDateComponent()
         {
-            var fileHashes = new Dictionary<string, string>();
+            var fileHashes = new ConcurrentDictionary<string, string>();
             var backupDates = new HashSet<DateTime>();
             var system = new BackupDecisionSystem(fileHashes, backupDates);
 
@@ -45,10 +46,11 @@ namespace DifferentialBackup.Test.Systems
         [Fact]
         public void Execute_FileUnchanged_NoBackupDateComponent()
         {
-            var fileHashes = new Dictionary<string, string>
+            var fileHashes = new ConcurrentDictionary<string, string>(new Dictionary<string, string>
             {
                 { @"C:\test\file.txt", "existingHash" }
-            };
+            });
+
             var backupDates = new HashSet<DateTime>();
             var system = new BackupDecisionSystem(fileHashes, backupDates);
 
@@ -77,7 +79,7 @@ namespace DifferentialBackup.Test.Systems
         [Fact]
         public void Execute_MissingComponents_ReturnsFailure()
         {
-            var fileHashes = new Dictionary<string, string>();
+            var fileHashes = new ConcurrentDictionary<string, string>();
             var backupDates = new HashSet<DateTime>();
             var system = new BackupDecisionSystem(fileHashes, backupDates);
 

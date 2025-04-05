@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.IO;
 using System;
 using System.Linq;
+using System.Collections.Concurrent;
 
 namespace DifferentialBackup.Test.Utilities
 {
@@ -13,11 +14,11 @@ namespace DifferentialBackup.Test.Utilities
         [Fact]
         public void SaveAndLoadFileHashes_Success()
         {
-            var fileHashes = new Dictionary<string, string>
+            var fileHashes = new ConcurrentDictionary<string, string>(new Dictionary<string, string>
             {
                 { @"C:\path\to\file1.txt", "hash1" },
                 { @"C:\path\to\file2.txt", "hash2" }
-            };
+            });
             var filePath = Path.Combine(Path.GetTempPath(), "fileHashes.json");
 
             DataPersistence.SaveFileHashes(fileHashes, filePath);

@@ -5,15 +5,16 @@ using DOPipeline.Utilities;
 using DifferentialBackup.Components;
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 
 namespace DifferentialBackup.Systems
 {
     public class BackupDecisionSystem : ISystem
     {
-        private readonly Dictionary<string, string> _fileHashes;
+        private readonly ConcurrentDictionary<string, string> _fileHashes;
         private readonly HashSet<DateTime> _backupDates;
 
-        public BackupDecisionSystem(Dictionary<string, string> fileHashes, HashSet<DateTime> backupDates)
+        public BackupDecisionSystem(ConcurrentDictionary<string, string> fileHashes, HashSet<DateTime> backupDates)
         {
             _fileHashes = fileHashes;
             _backupDates = backupDates;
