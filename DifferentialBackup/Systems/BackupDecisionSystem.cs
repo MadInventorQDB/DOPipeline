@@ -13,6 +13,7 @@ namespace DifferentialBackup.Systems
     {
         private readonly ConcurrentDictionary<string, string> _fileHashes;
         private readonly HashSet<DateTime> _backupDates;
+        private readonly object _backupDateslock = new object();
 
         public BackupDecisionSystem(ConcurrentDictionary<string, string> fileHashes, HashSet<DateTime> backupDates)
         {
@@ -37,8 +38,11 @@ namespace DifferentialBackup.Systems
                 // Update the hash in the fileHashes
                 _fileHashes[filePathComponent.FilePath] = fileHashComponent.CurrentHash;
 
-                // Add the backup date
-                _backupDates.Add(backupDate);
+                lock(_backupDateslock)
+                {
+                    // Add the backup date
+                    _backupDates.Add(backupDate);
+                }
             }
 
             return Result.Success();
