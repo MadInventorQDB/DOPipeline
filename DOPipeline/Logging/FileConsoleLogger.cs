@@ -23,7 +23,12 @@ namespace DOPipeline.Logging
                 }
 
                 // Open the file for appending, create if it doesn't exist
-                _streamWriter = new StreamWriter(_logFilePath, append: true) { AutoFlush = true };
+                var fileStream = new FileStream(
+                    _logFilePath,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.ReadWrite);
+                _streamWriter = new StreamWriter(fileStream) { AutoFlush = true };
             }
             catch (Exception ex)
             {
