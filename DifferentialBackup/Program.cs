@@ -23,6 +23,7 @@ namespace DifferentialBackup
             Backup,
             Restore,
             Query,
+            Duplicate,
             Help
         }
 
@@ -65,6 +66,9 @@ namespace DifferentialBackup
                         break;
                     case Operation.Query:
                         PerformQuery(args.Skip(1).ToArray());
+                        break;
+                    case Operation.Duplicate:
+                        PerformDuplicateDetection(args.Skip(1).ToArray());
                         break;
                     case Operation.Help:
                     default:
@@ -415,6 +419,74 @@ namespace DifferentialBackup
             _pipelineLogger.Log("Query operation complete.");
         }
 
+        // --- Duplicate Detection Operation ---
+        static void PerformDuplicateDetection(string[] args)
+        {
+            if (_pipelineLogger == null) { Console.WriteLine("[FATAL ERROR] Logger not initialized. Cannot proceed."); return; }
+            _pipelineLogger.Log("Starting Duplicate Detection operation setup.");
+
+            string sourceDirectory;
+
+            if (args.Length >= 1)
+            {
+                sourceDirectory = args[0];
+                _pipelineLogger.Log($"Using command-line argument for Duplicate Detection: Source='{sourceDirectory}'");
+                Console.WriteLine("Using command-line argument for Duplicate Detection:");
+                Console.WriteLine($"Source Directory: {sourceDirectory}");
+            }
+            else
+            {
+                _pipelineLogger.Log("Insufficient command-line arguments. Prompting user for Duplicate Detection parameters.");
+                Console.WriteLine("Duplicate Detection requires a source directory.");
+                sourceDirectory = PromptForDirectory("Enter the Source Directory", mustExist: true);
+                if (string.IsNullOrEmpty(sourceDirectory)) return;
+                _pipelineLogger.Log($"User provided Duplicate Detection parameter: Source='{sourceDirectory}'");
+            }
+
+            if (!Directory.Exists(sourceDirectory))
+            {
+                _pipelineLogger.Log($"[ERROR] Source directory does not exist: '{sourceDirectory}'");
+                Console.WriteLine($"Error: Source directory not found: {sourceDirectory}");
+                return;
+            }
+
+            _pipelineLogger.Log("Initializing storage for Duplicate Detection.");
+            var storage = new ComponentStorage();
+            var root = new Entity();
+            storage.SetComponent(root, new FilePathComponent { FilePath = sourceDirectory });
+            var entities = new List<Entity> { root };
+
+            _pipelineLogger.Log("Building DuplicateDetection pipeline...");
+            var pipeline = DuplicateDetectionPipelineBuilder.BuildDuplicateDetectionPipeline(
+                sourceDirectory,
+                _pipelineLogger);
+
+            _pipelineLogger.Log("Executing DuplicateDetection pipeline...");
+            var result = pipeline.Execute(entities, storage);
+
+            if (result.IsSuccess)
+            {
+                var dupComponent = storage.GetComponent<DuplicateFilesComponent>(root);
+                if (dupComponent != null && dupComponent.Groups.Any())
+                {
+                    _pipelineLogger.Log($"Duplicate Detection finished. Found {dupComponent.Groups.Count} duplicate groups.");
+                    Console.WriteLine($"Found {dupComponent.Groups.Count} groups of duplicate files. See log for details.");
+                }
+                else
+                {
+                    _pipelineLogger.Log("Duplicate Detection finished. No duplicates found.");
+                    Console.WriteLine("No duplicate files found.");
+                }
+            }
+            else
+            {
+                _pipelineLogger.Log($"[ERROR] Duplicate Detection pipeline failed: {result.ErrorMessage}");
+                Console.WriteLine($"Duplicate detection failed: {result.ErrorMessage}");
+            }
+
+            _pipelineLogger.Log("Duplicate Detection operation complete.");
+        }
+
         // --- Helper Methods ---
 
         /// <summary>
@@ -535,12 +607,17 @@ namespace DifferentialBackup
             Console.WriteLine("           Arguments (Optional - will prompt if missing):");
             Console.WriteLine("             <BackupDestination>  Path where backup folders are stored.");
             Console.WriteLine();
+            Console.WriteLine("  duplicate Detects duplicate files in a directory and logs results.");
+            Console.WriteLine("           Arguments (Optional - will prompt if missing):");
+            Console.WriteLine("             <SourceDirectory>  Path to the directory to scan for duplicates.");
+            Console.WriteLine();
             Console.WriteLine("  help     Displays this help message.");
             Console.WriteLine();
             Console.WriteLine("Examples:");
             Console.WriteLine(@"  DifferentialBackup.exe backup ""C:\My Documents"" ""D:\Backups\MyDocs""");
             Console.WriteLine(@"  DifferentialBackup.exe restore ""D:\Backups\MyDocs"" ""C:\Restored Documents""");
             Console.WriteLine(@"  DifferentialBackup.exe query ""D:\Backups\MyDocs""");
+            Console.WriteLine(@"  DifferentialBackup.exe duplicate ""C:\My Documents""");
             Console.WriteLine(@"  DifferentialBackup.exe help");
             Console.WriteLine();
             Console.WriteLine("Data Files:");

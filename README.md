@@ -42,6 +42,7 @@
 - **Backup:** Perform differential backups by only copying changed files, optimizing storage and time.
 - **Restore:** Restore files from a specific backup date, ensuring data integrity and availability.
 - **Query:** List all available backup dates for easy management and selection.
+- **Duplicate Detection:** Identify groups of duplicate files within a directory and log them.
 - **Interactive Prompts:** User-friendly prompts for required inputs when command-line arguments are not provided.
 - **Data Persistence:** Maintains file hashes and backup dates for efficient backup operations.
 
@@ -186,6 +187,22 @@ DifferentialBackup.exe query <BackupDestination>
 
 ```bash
 DifferentialBackup.exe query "D:\Backups\SourceBackup"
+```
+
+#### Duplicate Detection
+
+Scan a directory for duplicate files and log the results.
+
+##### Command
+
+```bash
+DifferentialBackup.exe duplicate <SourceDirectory>
+```
+
+##### Example
+
+```bash
+DifferentialBackup.exe duplicate "C:\My Documents"
 ```
 
 #### Help
