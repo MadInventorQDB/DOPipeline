@@ -30,43 +30,45 @@ namespace DifferentialBackup.Test.Pipeline
             var tempDir = Path.Combine(Path.GetTempPath(), "DupPipeExecTest");
             Directory.CreateDirectory(tempDir);
             var logPath = Path.Combine(tempDir, "dup.log");
-            using var logger = new FileConsoleLogger(logPath);
             var file1 = Path.Combine(tempDir, "a.txt");
             var file2 = Path.Combine(tempDir, "b.txt");
             var file3 = Path.Combine(tempDir, "c.txt");
             var file4 = Path.Combine(tempDir, "d.txt");
-            File.WriteAllText(file1, "abc");
-            File.WriteAllText(file2, "abc");
-            File.WriteAllText(file3, "abc");
-            File.WriteAllText(file4, "xyz");
-
-            var pipeline = DuplicateDetectionPipelineBuilder.BuildDuplicateDetectionPipeline(tempDir, logger);
-            var storage = new ComponentStorage();
-            var root = new Entity();
-            storage.SetComponent(root, new FilePathComponent { FilePath = tempDir });
-            var entities = new List<Entity> { root };
-            var result = pipeline.Execute(entities, storage);
-            Assert.True(result.IsSuccess);
-            var dupComponent = storage.GetComponent<DuplicateFilesComponent>(root);
-            Assert.NotNull(dupComponent);
-            Assert.Single(dupComponent.Groups);
-            var group = dupComponent.Groups[0];
-            Assert.Contains(file1, group);
-            Assert.Contains(file2, group);
-            Assert.Contains(file3, group);
-            Assert.DoesNotContain(file4, group);
-
-            var logContents = File.ReadAllText(logPath);
-            Assert.Contains(file1, logContents);
-            Assert.Contains(file2, logContents);
-            Assert.Contains(file3, logContents);
-            Assert.DoesNotContain(file4, logContents);
-
-            foreach (var entity in storage.GetAllEntities())
+            using (var logger = new FileConsoleLogger(logPath))
             {
-                if (entity != root && storage.HasComponent<FilePathComponent>(entity))
+                File.WriteAllText(file1, "abc");
+                File.WriteAllText(file2, "abc");
+                File.WriteAllText(file3, "abc");
+                File.WriteAllText(file4, "xyz");
+
+                var pipeline = DuplicateDetectionPipelineBuilder.BuildDuplicateDetectionPipeline(tempDir, logger);
+                var storage = new ComponentStorage();
+                var root = new Entity();
+                storage.SetComponent(root, new FilePathComponent { FilePath = tempDir });
+                var entities = new List<Entity> { root };
+                var result = pipeline.Execute(entities, storage);
+                Assert.True(result.IsSuccess);
+                var dupComponent = storage.GetComponent<DuplicateFilesComponent>(root);
+                Assert.NotNull(dupComponent);
+                Assert.Single(dupComponent.Groups);
+                var group = dupComponent.Groups[0];
+                Assert.Contains(file1, group);
+                Assert.Contains(file2, group);
+                Assert.Contains(file3, group);
+                Assert.DoesNotContain(file4, group);
+
+                var logContents = TestFileHelpers.ReadAllTextShared(logPath);
+                Assert.Contains(file1, logContents);
+                Assert.Contains(file2, logContents);
+                Assert.Contains(file3, logContents);
+                Assert.DoesNotContain(file4, logContents);
+
+                foreach (var entity in storage.GetAllEntities())
                 {
-                    Assert.Null(storage.GetComponent<DuplicateFilesComponent>(entity));
+                    if (entity != root && storage.HasComponent<FilePathComponent>(entity))
+                    {
+                        Assert.Null(storage.GetComponent<DuplicateFilesComponent>(entity));
+                    }
                 }
             }
 
