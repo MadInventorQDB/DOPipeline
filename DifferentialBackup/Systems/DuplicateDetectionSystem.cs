@@ -21,8 +21,10 @@ namespace DifferentialBackup.Systems
         public Result Execute(Entity entity, IComponentStorage storage)
         {
             // This system should only operate once on the root entity. Other entities
-            // represent individual files and are ignored here.
-            if (storage.HasComponent<FileHashComponent>(entity))
+            // represent individual files and are ignored here. We identify the root by
+            // checking that its FilePath points to a directory rather than a file.
+            var pathComponent = storage.GetComponent<FilePathComponent>(entity);
+            if (pathComponent == null || File.Exists(pathComponent.FilePath))
             {
                 return Result.Success();
             }
