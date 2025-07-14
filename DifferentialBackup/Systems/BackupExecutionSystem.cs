@@ -14,6 +14,8 @@ namespace DifferentialBackup.Systems
         private readonly string _sourceDirectory;
         private readonly string _backupDestination;
 
+        private static readonly object _zipLock = new();
+
         public BackupExecutionSystem(string sourceDirectory, string backupDestination)
         {
             _sourceDirectory = sourceDirectory;
@@ -40,13 +42,16 @@ namespace DifferentialBackup.Systems
                 var zipName = backupDateComponent.BackupDate.ToString("yyyyMMddHHmmss") + ".zip";
                 var zipPath = Path.Combine(_backupDestination, zipName);
 
-                Directory.CreateDirectory(_backupDestination);
-                using var archive = ZipFile.Open(zipPath, ZipArchiveMode.Update);
+                lock (_zipLock)
+                {
+                    Directory.CreateDirectory(_backupDestination);
+                    using var archive = ZipFile.Open(zipPath, ZipArchiveMode.Update);
 
-                var entryName = relativePath.Replace(Path.DirectorySeparatorChar, '/');
-                var existingEntry = archive.GetEntry(entryName);
-                existingEntry?.Delete();
-                archive.CreateEntryFromFile(filePathComponent.FilePath, entryName, CompressionLevel.Optimal);
+                    var entryName = relativePath.Replace(Path.DirectorySeparatorChar, '/');
+                    var existingEntry = archive.GetEntry(entryName);
+                    existingEntry?.Delete();
+                    archive.CreateEntryFromFile(filePathComponent.FilePath, entryName, CompressionLevel.Optimal);
+                }
 
                 return Result.Success();
             }
