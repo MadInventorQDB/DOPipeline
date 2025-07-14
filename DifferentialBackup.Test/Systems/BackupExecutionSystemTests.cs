@@ -38,8 +38,10 @@ namespace DifferentialBackup.Test.Systems
             var backupZipPath = Path.Combine(backupDestination, backupZipName);
             Assert.True(File.Exists(backupZipPath));
 
-            using var archive = ZipFile.OpenRead(backupZipPath);
-            Assert.NotNull(archive.GetEntry("file.txt"));
+            using (var archive = ZipFile.OpenRead(backupZipPath))
+            {
+                Assert.NotNull(archive.GetEntry("file.txt"));
+            }
 
             Directory.Delete(sourceDirectory, true);
             Directory.Delete(backupDestination, true);
