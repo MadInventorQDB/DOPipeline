@@ -4,6 +4,7 @@ using DOPipeline.Systems;
 using DOPipeline.Utilities;
 using System;
 using System.IO;
+using System.IO.Compression;
 
 namespace DifferentialBackup.Systems
 {
@@ -24,17 +25,18 @@ namespace DifferentialBackup.Systems
         {
             try
             {
-                var backupFolder = Path.Combine(_backupDestination, _backupDate.ToString("yyyyMMddHHmmss"));
-                if (!Directory.Exists(backupFolder))
+                var zipName = _backupDate.ToString("yyyyMMddHHmmss") + ".zip";
+                var zipPath = Path.Combine(_backupDestination, zipName);
+                if (!File.Exists(zipPath))
                     return Result.Fail("Backup date not found.");
 
-                var files = Directory.GetFiles(backupFolder, "*", SearchOption.AllDirectories);
-                foreach (var file in files)
+                using var archive = ZipFile.OpenRead(zipPath);
+                foreach (var entry in archive.Entries)
                 {
-                    var relativePath = Path.GetRelativePath(backupFolder, file);
+                    var relativePath = entry.FullName.Replace('/', Path.DirectorySeparatorChar);
                     var restorePath = Path.Combine(_restoreDestination, relativePath);
                     Directory.CreateDirectory(Path.GetDirectoryName(restorePath)!);
-                    File.Copy(file, restorePath, true);
+                    entry.ExtractToFile(restorePath, true);
                 }
 
                 return Result.Success();
