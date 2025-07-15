@@ -5,7 +5,6 @@ using DOPipeline.Utilities;
 using DifferentialBackup.Components;
 using System;
 using System.IO;
-using System.IO.Compression;
 
 namespace DifferentialBackup.Systems
 {
@@ -13,8 +12,6 @@ namespace DifferentialBackup.Systems
     {
         private readonly string _sourceDirectory;
         private readonly string _backupDestination;
-
-        private static readonly object _zipLock = new();
 
         public BackupExecutionSystem(string sourceDirectory, string backupDestination)
         {
@@ -39,19 +36,11 @@ namespace DifferentialBackup.Systems
             try
             {
                 var relativePath = Path.GetRelativePath(_sourceDirectory, filePathComponent.FilePath);
-                var zipName = backupDateComponent.BackupDate.ToString("yyyyMMddHHmmss") + ".zip";
-                var zipPath = Path.Combine(_backupDestination, zipName);
+                var backupFolder = Path.Combine(_backupDestination, backupDateComponent.BackupDate.ToString("yyyyMMddHHmmss"));
+                var backupPath = Path.Combine(backupFolder, relativePath);
 
-                lock (_zipLock)
-                {
-                    Directory.CreateDirectory(_backupDestination);
-                    using var archive = ZipFile.Open(zipPath, ZipArchiveMode.Update);
-
-                    var entryName = relativePath.Replace(Path.DirectorySeparatorChar, '/');
-                    var existingEntry = archive.GetEntry(entryName);
-                    existingEntry?.Delete();
-                    archive.CreateEntryFromFile(filePathComponent.FilePath, entryName, CompressionLevel.Optimal);
-                }
+                Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+                File.Copy(filePathComponent.FilePath, backupPath, true);
 
                 return Result.Success();
             }

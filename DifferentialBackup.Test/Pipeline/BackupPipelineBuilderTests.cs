@@ -50,7 +50,7 @@ namespace DifferentialBackup.Test.Pipeline
             var fileHashes = new ConcurrentDictionary<string, string>(); 
             var backupDates = new HashSet<System.DateTime>();
             var pipeline = BackupPipelineBuilder.BuildBackupPipeline(_sourceDirectory, _backupDestination, fileHashes, backupDates, _logger);
-            Assert.NotNull(pipeline); var pipesField = typeof(DOPipeline.Pipeline.Pipeline).GetField("_pipes", BindingFlags.NonPublic | BindingFlags.Instance); Assert.NotNull(pipesField); var pipes = pipesField.GetValue(pipeline) as List<DOPipeline.Pipeline.Pipe>; Assert.NotNull(pipes); Assert.Equal(4, pipes.Count);
+            Assert.NotNull(pipeline); var pipesField = typeof(DOPipeline.Pipeline.Pipeline).GetField("_pipes", BindingFlags.NonPublic | BindingFlags.Instance); Assert.NotNull(pipesField); var pipes = pipesField.GetValue(pipeline) as List<DOPipeline.Pipeline.Pipe>; Assert.NotNull(pipes); Assert.Equal(5, pipes.Count);
         }
 
         [Fact]

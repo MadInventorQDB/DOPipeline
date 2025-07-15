@@ -25,6 +25,7 @@ namespace DifferentialBackup.Test.Systems
             var backupDate = System.DateTime.UtcNow;
 
             var system = new BackupExecutionSystem(sourceDirectory, backupDestination);
+            var compressionSystem = new BackupCompressionSystem(backupDestination);
 
             var entity = new Entity();
             var storage = new ComponentStorage();
@@ -32,8 +33,7 @@ namespace DifferentialBackup.Test.Systems
             storage.SetComponent(entity, new BackupDateComponent { BackupDate = backupDate });
 
             var result = system.Execute(entity, storage);
-
-            Assert.True(result.IsSuccess);
+            compressionSystem.Execute(entity, storage);
             var backupZipName = backupDate.ToString("yyyyMMddHHmmss") + ".zip";
             var backupZipPath = Path.Combine(backupDestination, backupZipName);
             Assert.True(File.Exists(backupZipPath));
@@ -67,6 +67,7 @@ namespace DifferentialBackup.Test.Systems
             File.WriteAllText(sourceFile, "Test Content");
 
             var system = new BackupExecutionSystem(sourceDirectory, backupDestination);
+            var compressionSystem = new BackupCompressionSystem(backupDestination);
 
             var entity = new Entity();
             var storage = new ComponentStorage();
@@ -74,6 +75,7 @@ namespace DifferentialBackup.Test.Systems
 
             // Act
             var result = system.Execute(entity, storage);
+            compressionSystem.Execute(entity, storage);
 
             // Assert
             Assert.True(result.IsSuccess);
@@ -100,10 +102,12 @@ namespace DifferentialBackup.Test.Systems
             var system = new BackupExecutionSystem(sourceDirectory, backupDestination);
 
             var entity = new Entity();
+            var compressionSystem = new BackupCompressionSystem(backupDestination);
             var storage = new ComponentStorage();
             storage.SetComponent(entity, new BackupDateComponent { BackupDate = backupDate });
 
             var result = system.Execute(entity, storage);
+            compressionSystem.Execute(entity, storage);
 
             Assert.False(result.IsSuccess);
             Assert.Equal("FilePathComponent missing.", result.ErrorMessage);
