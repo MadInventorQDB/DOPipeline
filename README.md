@@ -37,10 +37,10 @@
 - **Robust Error Handling:** Gracefully handles failures within pipeline execution, ensuring reliability.
 - **Comprehensive Testing:** Includes extensive unit tests to ensure framework stability and correctness.
 
-### DifferentialBackup
+-### DifferentialBackup
 
-- **Backup:** Perform differential backups by only copying changed files, optimizing storage and time.
-- **Restore:** Restore files from a specific backup date, ensuring data integrity and availability.
+- **Backup:** Perform differential backups by archiving changed files into timestamped ZIP archives, optimizing storage and time.
+- **Restore:** Restore files from a specific backup date by extracting the corresponding ZIP archive, ensuring data integrity and availability.
 - **Query:** List all available backup dates for easy management and selection.
 - **Duplicate Detection:** Identify groups of duplicate files within a directory and log them.
 - **Interactive Prompts:** User-friendly prompts for required inputs when command-line arguments are not provided.
@@ -139,7 +139,7 @@ The `DifferentialBackup` utility showcases how DOPipeline can be used to impleme
 
 #### Backup
 
-Perform a backup by specifying the source directory and backup destination.
+Perform a backup by specifying the source directory and backup destination. Changed files are compressed into a ZIP archive named with the backup timestamp.
 
 ##### Command
 
@@ -157,7 +157,7 @@ If arguments are not provided, the utility will prompt for the required director
 
 #### Restore
 
-Restore files from a specific backup date.
+Restore files from a specific backup date by selecting the matching ZIP archive.
 
 ##### Command
 

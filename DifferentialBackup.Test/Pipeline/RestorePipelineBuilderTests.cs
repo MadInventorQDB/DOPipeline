@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Linq;
 using DOPipeline.Components;
 using System.Globalization;
+using System.IO.Compression;
 
 namespace DifferentialBackup.Test.Pipeline
 {
@@ -66,16 +67,20 @@ namespace DifferentialBackup.Test.Pipeline
         {
             // Arrange
             var backupDate = DateTime.UtcNow;
-            var backupFolderName = backupDate.ToString(BackupFolderFormat);
-            var backupFolderPath = Path.Combine(_backupDestination, backupFolderName);
-            Directory.CreateDirectory(backupFolderPath);
+            var backupZipName = backupDate.ToString(BackupFolderFormat) + ".zip";
+            var backupZipPath = Path.Combine(_backupDestination, backupZipName);
 
-            var backupFile1 = Path.Combine(backupFolderPath, "restore_test1.txt");
-            var subDir = Path.Combine(backupFolderPath, "SubFolder");
-            Directory.CreateDirectory(subDir);
-            var backupFile2 = Path.Combine(subDir, "restore_test2.log");
-            File.WriteAllText(backupFile1, "Content for File 1");
-            File.WriteAllText(backupFile2, "Logging data");
+            var temp1 = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            var temp2 = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            File.WriteAllText(temp1, "Content for File 1");
+            File.WriteAllText(temp2, "Logging data");
+            using (var archive = ZipFile.Open(backupZipPath, ZipArchiveMode.Create))
+            {
+                archive.CreateEntryFromFile(temp1, "restore_test1.txt");
+                archive.CreateEntryFromFile(temp2, Path.Combine("SubFolder", "restore_test2.log").Replace("\\", "/"));
+            }
+            File.Delete(temp1);
+            File.Delete(temp2);
 
             var pipeline = RestorePipelineBuilder.BuildRestorePipeline(_backupDestination, backupDate, _restoreDestination, _logger);
             var storage = new ComponentStorage();
@@ -105,8 +110,8 @@ namespace DifferentialBackup.Test.Pipeline
         {
             // Arrange
             var backupDate = DateTime.UtcNow.AddDays(-1);
-            var nonExistentFolderPath = Path.Combine(_backupDestination, backupDate.ToString(BackupFolderFormat));
-            if (Directory.Exists(nonExistentFolderPath)) { Directory.Delete(nonExistentFolderPath, true); }
+            var nonExistentZipPath = Path.Combine(_backupDestination, backupDate.ToString(BackupFolderFormat) + ".zip");
+            if (File.Exists(nonExistentZipPath)) { File.Delete(nonExistentZipPath); }
 
             var pipeline = RestorePipelineBuilder.BuildRestorePipeline(
                 _backupDestination,

@@ -11,6 +11,7 @@ using DifferentialBackup.Test.Helpers;
 using System;
 using DOPipeline.Logging;
 using DifferentialBackup.Utilities;
+using System.IO.Compression;
 //using System.Threading; // --- REMOVED ---
 using System.Globalization;
 using System.Collections.Concurrent; // <-- Added for DateTime parsing
@@ -49,7 +50,7 @@ namespace DifferentialBackup.Test.Pipeline
             var fileHashes = new ConcurrentDictionary<string, string>(); 
             var backupDates = new HashSet<System.DateTime>();
             var pipeline = BackupPipelineBuilder.BuildBackupPipeline(_sourceDirectory, _backupDestination, fileHashes, backupDates, _logger);
-            Assert.NotNull(pipeline); var pipesField = typeof(DOPipeline.Pipeline.Pipeline).GetField("_pipes", BindingFlags.NonPublic | BindingFlags.Instance); Assert.NotNull(pipesField); var pipes = pipesField.GetValue(pipeline) as List<DOPipeline.Pipeline.Pipe>; Assert.NotNull(pipes); Assert.Equal(4, pipes.Count);
+            Assert.NotNull(pipeline); var pipesField = typeof(DOPipeline.Pipeline.Pipeline).GetField("_pipes", BindingFlags.NonPublic | BindingFlags.Instance); Assert.NotNull(pipesField); var pipes = pipesField.GetValue(pipeline) as List<DOPipeline.Pipeline.Pipe>; Assert.NotNull(pipes); Assert.Equal(5, pipes.Count);
         }
 
         [Fact]
@@ -75,13 +76,12 @@ namespace DifferentialBackup.Test.Pipeline
             Assert.Single(fileHashes);
             Assert.True(fileHashes.ContainsKey(sourceFile));
             Assert.Single(backupDates);
-            var backupFolders1 = Directory.GetDirectories(_backupDestination);
-            Assert.Single(backupFolders1); // Verify folder created
-            var firstBackupFolderName = Path.GetFileName(backupFolders1[0]);
-            // Parse the date used for the first folder name
-            Assert.True(DateTime.TryParseExact(firstBackupFolderName, BackupFolderFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime dateUsedInRun1), "Could not parse DateTime from first backup folder name.");
-            var formatStringRun1 = dateUsedInRun1.ToString(BackupFolderFormat); // Get the exact string used
-            Console.WriteLine($"TEST: Run 1 completed. Folder Name: {firstBackupFolderName}, Parsed Date Used: {dateUsedInRun1:o}, Format String: {formatStringRun1}");
+            var backupZips1 = Directory.GetFiles(_backupDestination, "*.zip");
+            Assert.Single(backupZips1); // Verify archive created
+            var firstBackupFileName = Path.GetFileNameWithoutExtension(backupZips1[0]);
+            Assert.True(DateTime.TryParseExact(firstBackupFileName, BackupFolderFormat, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime dateUsedInRun1), "Could not parse DateTime from first backup file name.");
+            var formatStringRun1 = dateUsedInRun1.ToString(BackupFolderFormat);
+            Console.WriteLine($"TEST: Run 1 completed. Archive Name: {firstBackupFileName}, Parsed Date Used: {dateUsedInRun1:o}, Format String: {formatStringRun1}");
 
 
             // --- Arrange Run 2: Modify file ---
@@ -125,20 +125,24 @@ namespace DifferentialBackup.Test.Pipeline
             Assert.Equal(hashReadAfterWrite, fileHashes[sourceFile]);
             Assert.Equal(2, backupDates.Count); // Date should have been added
 
-            // Check folder count - THIS SHOULD NOW PASS RELIABLY
-            var backupFolders2 = Directory.GetDirectories(_backupDestination).OrderBy(d => d).ToList();
-            if (backupFolders2.Count != 2)
+            var backupZips2 = Directory.GetFiles(_backupDestination, "*.zip").OrderBy(d => d).ToList();
+            if (backupZips2.Count != 2)
             {
-                Console.WriteLine($"TEST_FAIL: Expected 2 backup folders, but found {backupFolders2.Count}. Folders: [{string.Join(", ", backupFolders2)}]");
+                Console.WriteLine($"TEST_FAIL: Expected 2 backup archives, but found {backupZips2.Count}. Files: [{string.Join(", ", backupZips2)}]");
             }
-            Assert.Equal(2, backupFolders2.Count);
+            Assert.Equal(2, backupZips2.Count);
 
-            // Verify content of the second backup folder
-            var secondBackupFolderName = Path.GetFileName(backupFolders2[1]);
-            Assert.NotEqual(firstBackupFolderName, secondBackupFolderName); // Ensure folder names are different
-            var backedUpFile2 = Path.Combine(backupFolders2[1], "file1.txt");
-            Assert.True(File.Exists(backedUpFile2), $"Backup file '{backedUpFile2}' should exist after second run.");
-            Assert.Equal("Modified Content", File.ReadAllText(backedUpFile2));
+            var secondBackupName = Path.GetFileNameWithoutExtension(backupZips2[1]);
+            Assert.NotEqual(firstBackupFileName, secondBackupName);
+
+            using (var archive = ZipFile.OpenRead(backupZips2[1]))
+            {
+                var entry = archive.GetEntry("file1.txt");
+                Assert.NotNull(entry);
+                using var reader = new StreamReader(entry.Open());
+                var content = reader.ReadToEnd();
+                Assert.Equal("Modified Content", content);
+            }
             Console.WriteLine($"TEST: Run 2 completed assertions successfully.");
         }
 
@@ -161,7 +165,7 @@ namespace DifferentialBackup.Test.Pipeline
             // Assert: Sanity check first run
             Assert.Single(fileHashes);
             Assert.Single(backupDates);
-            Assert.Single(Directory.GetDirectories(_backupDestination));
+            Assert.Single(Directory.GetFiles(_backupDestination, "*.zip"));
             var initialHash = fileHashes[sourceFile];
             var initialBackupDateCount = backupDates.Count;
 
@@ -178,7 +182,7 @@ namespace DifferentialBackup.Test.Pipeline
             Assert.Single(fileHashes);
             Assert.Equal(initialHash, fileHashes[sourceFile]); // Hash unchanged
             Assert.Equal(initialBackupDateCount, backupDates.Count); // Date count unchanged
-            Assert.Single(Directory.GetDirectories(_backupDestination)); // Folder count unchanged
+            Assert.Single(Directory.GetFiles(_backupDestination, "*.zip")); // Archive count unchanged
         }
     }
 }

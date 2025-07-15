@@ -53,6 +53,11 @@ namespace DifferentialBackup.Pipeline
                 .Named("Backup Execution")
                 .AddSystem(new BackupExecutionSystem(sourceDirectory, backupDestination)));
 
+            // Pipe 5: Compress backup folders into zip archives
+            pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder
+                .Named("Backup Compression")
+                .AddSystem(new BackupCompressionSystem(backupDestination)));
+
             return pipelineBuilder.Build();
         }
     }

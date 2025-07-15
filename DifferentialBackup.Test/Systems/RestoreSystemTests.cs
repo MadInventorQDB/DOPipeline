@@ -4,6 +4,7 @@ using DOPipeline.Entities;
 using DOPipeline.Storage;
 using System.IO;
 using System;
+using System.IO.Compression;
 
 namespace DifferentialBackup.Test.Systems
 {
@@ -19,12 +20,16 @@ namespace DifferentialBackup.Test.Systems
             Directory.CreateDirectory(restoreDestination);
 
             var backupDate = DateTime.UtcNow;
-            var backupFolderName = backupDate.ToString("yyyyMMddHHmmss");
-            var backupFolderPath = Path.Combine(backupDestination, backupFolderName);
-            Directory.CreateDirectory(backupFolderPath);
+            var backupZipName = backupDate.ToString("yyyyMMddHHmmss") + ".zip";
+            var backupZipPath = Path.Combine(backupDestination, backupZipName);
 
-            var backupFile = Path.Combine(backupFolderPath, "file.txt");
-            File.WriteAllText(backupFile, "Backup Content");
+            var tempFile = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+            File.WriteAllText(tempFile, "Backup Content");
+            using (var archive = ZipFile.Open(backupZipPath, ZipArchiveMode.Create))
+            {
+                archive.CreateEntryFromFile(tempFile, "file.txt");
+            }
+            File.Delete(tempFile);
 
             var system = new RestoreSystem(backupDestination, backupDate, restoreDestination);
 
@@ -59,7 +64,7 @@ namespace DifferentialBackup.Test.Systems
 
             var backupDate = DateTime.UtcNow;
 
-            // Do not create backup folder for the given date to simulate missing backup
+            // Do not create backup archive for the given date to simulate missing backup
             var system = new RestoreSystem(backupDestination, backupDate, restoreDestination);
 
             var entity = new Entity();

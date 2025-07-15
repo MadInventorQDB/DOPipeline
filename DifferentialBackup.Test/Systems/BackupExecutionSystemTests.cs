@@ -5,6 +5,7 @@ using DOPipeline.Entities;
 using DOPipeline.Storage;
 using DifferentialBackup.Components;
 using System.IO;
+using System.IO.Compression;
 
 namespace DifferentialBackup.Test.Systems
 {
@@ -24,6 +25,7 @@ namespace DifferentialBackup.Test.Systems
             var backupDate = System.DateTime.UtcNow;
 
             var system = new BackupExecutionSystem(sourceDirectory, backupDestination);
+            var compressionSystem = new BackupCompressionSystem(backupDestination);
 
             var entity = new Entity();
             var storage = new ComponentStorage();
@@ -31,11 +33,15 @@ namespace DifferentialBackup.Test.Systems
             storage.SetComponent(entity, new BackupDateComponent { BackupDate = backupDate });
 
             var result = system.Execute(entity, storage);
+            compressionSystem.Execute(entity, storage);
+            var backupZipName = backupDate.ToString("yyyyMMddHHmmss") + ".zip";
+            var backupZipPath = Path.Combine(backupDestination, backupZipName);
+            Assert.True(File.Exists(backupZipPath));
 
-            Assert.True(result.IsSuccess);
-            var backupFolderName = backupDate.ToString("yyyyMMddHHmmss");
-            var backupFilePath = Path.Combine(backupDestination, backupFolderName, "file.txt");
-            Assert.True(File.Exists(backupFilePath));
+            using (var archive = ZipFile.OpenRead(backupZipPath))
+            {
+                Assert.NotNull(archive.GetEntry("file.txt"));
+            }
 
             Directory.Delete(sourceDirectory, true);
             Directory.Delete(backupDestination, true);
@@ -61,6 +67,7 @@ namespace DifferentialBackup.Test.Systems
             File.WriteAllText(sourceFile, "Test Content");
 
             var system = new BackupExecutionSystem(sourceDirectory, backupDestination);
+            var compressionSystem = new BackupCompressionSystem(backupDestination);
 
             var entity = new Entity();
             var storage = new ComponentStorage();
@@ -68,13 +75,14 @@ namespace DifferentialBackup.Test.Systems
 
             // Act
             var result = system.Execute(entity, storage);
+            compressionSystem.Execute(entity, storage);
 
             // Assert
             Assert.True(result.IsSuccess);
 
-            // Check if any backup folders were created
-            var backupFolders = Directory.GetDirectories(backupDestination);
-            Assert.Empty(backupFolders);
+            // Check if any backup archives were created
+            var backupZips = Directory.GetFiles(backupDestination, "*.zip");
+            Assert.Empty(backupZips);
 
             // Clean up
             Directory.Delete(sourceDirectory, true);
@@ -94,13 +102,18 @@ namespace DifferentialBackup.Test.Systems
             var system = new BackupExecutionSystem(sourceDirectory, backupDestination);
 
             var entity = new Entity();
+            var compressionSystem = new BackupCompressionSystem(backupDestination);
             var storage = new ComponentStorage();
             storage.SetComponent(entity, new BackupDateComponent { BackupDate = backupDate });
 
             var result = system.Execute(entity, storage);
+            compressionSystem.Execute(entity, storage);
 
             Assert.False(result.IsSuccess);
             Assert.Equal("FilePathComponent missing.", result.ErrorMessage);
+
+            var zips = Directory.GetFiles(backupDestination, "*.zip");
+            Assert.Empty(zips);
 
             Directory.Delete(sourceDirectory, true);
             Directory.Delete(backupDestination, true);
