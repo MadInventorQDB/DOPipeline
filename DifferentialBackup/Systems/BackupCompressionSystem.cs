@@ -5,14 +5,13 @@ using DOPipeline.Utilities;
 using System;
 using System.IO;
 using System.IO.Compression;
-using System.Threading;
 
 namespace DifferentialBackup.Systems
 {
     public class BackupCompressionSystem : ISystem
     {
         private readonly string _backupDestination;
-        private int _executed;
+        private static readonly object _lock = new();
 
         public BackupCompressionSystem(string backupDestination)
         {
@@ -21,32 +20,33 @@ namespace DifferentialBackup.Systems
 
         public Result Execute(Entity entity, IComponentStorage storage)
         {
-            if (Interlocked.Exchange(ref _executed, 1) == 1)
+            // Multiple entities may trigger this system concurrently due to the pipeline's
+            // Parallel.ForEach execution model. To avoid racing or double-processing we
+            // synchronize compression so that only one thread performs the work at a time.
+            lock (_lock)
             {
-                return Result.Success();
-            }
-
-            try
-            {
-                if (!Directory.Exists(_backupDestination))
-                    return Result.Success();
-
-                var folders = Directory.GetDirectories(_backupDestination);
-                foreach (var folder in folders)
+                try
                 {
-                    var zipPath = folder + ".zip";
-                    if (!File.Exists(zipPath))
-                    {
-                        ZipFile.CreateFromDirectory(folder, zipPath, CompressionLevel.Optimal, false);
-                        Directory.Delete(folder, true);
-                    }
-                }
+                    if (!Directory.Exists(_backupDestination))
+                        return Result.Success();
 
-                return Result.Success();
-            }
-            catch (Exception ex)
-            {
-                return Result.Fail($"Failed to compress backups: {ex.Message}");
+                    var folders = Directory.GetDirectories(_backupDestination);
+                    foreach (var folder in folders)
+                    {
+                        var zipPath = folder + ".zip";
+                        if (!File.Exists(zipPath))
+                        {
+                            ZipFile.CreateFromDirectory(folder, zipPath, CompressionLevel.Optimal, false);
+                            Directory.Delete(folder, true);
+                        }
+                    }
+
+                    return Result.Success();
+                }
+                catch (Exception ex)
+                {
+                    return Result.Fail($"Failed to compress backups: {ex.Message}");
+                }
             }
         }
     }
