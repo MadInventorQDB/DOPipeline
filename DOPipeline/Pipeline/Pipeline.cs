@@ -57,7 +57,7 @@ namespace DOPipeline.Pipeline
                 _logger.Log($"Executing Pipe {pipeIndex}/{_pipes.Count}: '{pipe.Name}' on {currentEntities.Count} entities...");
 
                 // Execute the current pipe on the current set of entities
-                var pipeResult = pipe.Execute(currentEntities, storage); // Pipe.Execute internally handles system results
+                var pipeResult = pipe.Execute(currentEntities, storage, _logger); // Pipe.Execute internally handles system results
 
                 if (!pipeResult.IsSuccess)
                 {

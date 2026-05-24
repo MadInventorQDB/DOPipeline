@@ -3,11 +3,12 @@ using System.IO;
 
 namespace DOPipeline.Logging
 {
-    public class FileConsoleLogger : IPipelineLogger
+    public class FileConsoleLogger : IPipelineLogger, IProgressLogger
     {
         private readonly string _logFilePath;
         private readonly StreamWriter _streamWriter;
         private static readonly object _lock = new object(); // For thread safety on file write
+        private bool _progressActive;
 
         public FileConsoleLogger(string logFilePath)
         {
@@ -43,12 +44,11 @@ namespace DOPipeline.Logging
         {
             string logEntry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {message}";
 
-            // Log to console
-            Console.WriteLine(logEntry);
-
-            // Log to file (thread-safe)
             lock (_lock)
             {
+                ClearProgressLine();
+                Console.WriteLine(logEntry);
+
                 try
                 {
                     if (_streamWriter != StreamWriter.Null)
@@ -64,11 +64,39 @@ namespace DOPipeline.Logging
             }
         }
 
+        public void ReportProgress(string message)
+        {
+            lock (_lock)
+            {
+                if (Console.IsOutputRedirected)
+                {
+                    return;
+                }
+
+                var width = Math.Max(20, Console.WindowWidth - 1);
+                var trimmed = message.Length > width ? message.Substring(0, width) : message;
+                Console.Write("\r" + trimmed.PadRight(width));
+                _progressActive = true;
+            }
+        }
+
         public void Dispose()
         {
             Log("--- Logger Shutting Down ---");
             _streamWriter.Dispose();
             GC.SuppressFinalize(this);
+        }
+
+        private void ClearProgressLine()
+        {
+            if (!_progressActive || Console.IsOutputRedirected)
+            {
+                return;
+            }
+
+            var width = Math.Max(20, Console.WindowWidth - 1);
+            Console.Write("\r" + new string(' ', width) + "\r");
+            _progressActive = false;
         }
     }
 }

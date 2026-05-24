@@ -12,6 +12,7 @@ namespace DifferentialBackup.Systems
     public class DuplicateLoggingSystem : ISystem
     {
         private readonly IPipelineLogger _logger;
+        private readonly object _lock = new();
         private bool _logged;
 
         public DuplicateLoggingSystem(IPipelineLogger logger)
@@ -21,32 +22,39 @@ namespace DifferentialBackup.Systems
 
         public Result Execute(Entity entity, IComponentStorage storage)
         {
-            // Only log once on root entity
-            if (_logged || storage.HasComponent<FileHashComponent>(entity))
+            var dupComponent = storage.GetComponent<DuplicateFilesComponent>(entity);
+            if (dupComponent == null)
             {
                 return Result.Success();
             }
 
-            try
+            lock (_lock)
             {
-                var dupComponent = storage.GetComponent<DuplicateFilesComponent>(entity);
-                if (dupComponent != null && dupComponent.Groups.Any())
+                if (_logged)
                 {
-                    foreach (var group in dupComponent.Groups)
+                    return Result.Success();
+                }
+
+                try
+                {
+                    if (dupComponent.Groups.Any())
                     {
-                        _logger.Log($"Duplicate files: {string.Join(", ", group)}");
+                        foreach (var group in dupComponent.Groups)
+                        {
+                            _logger.Log($"Duplicate files: {string.Join(", ", group)}");
+                        }
                     }
+                    else
+                    {
+                        _logger.Log("No duplicate files found.");
+                    }
+                    _logged = true;
+                    return Result.Success();
                 }
-                else
+                catch (Exception ex)
                 {
-                    _logger.Log("No duplicate files found.");
+                    return Result.Fail($"Failed to log duplicates: {ex.Message}");
                 }
-                _logged = true;
-                return Result.Success();
-            }
-            catch (Exception ex)
-            {
-                return Result.Fail($"Failed to log duplicates: {ex.Message}");
             }
         }
     }

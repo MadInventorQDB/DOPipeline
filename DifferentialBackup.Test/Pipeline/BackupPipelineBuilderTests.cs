@@ -15,6 +15,7 @@ using System.IO.Compression;
 //using System.Threading; // --- REMOVED ---
 using System.Globalization;
 using System.Collections.Concurrent; // <-- Added for DateTime parsing
+using System.Text.Json;
 
 namespace DifferentialBackup.Test.Pipeline
 {
@@ -144,6 +145,105 @@ namespace DifferentialBackup.Test.Pipeline
                 Assert.Equal("Modified Content", content);
             }
             Console.WriteLine($"TEST: Run 2 completed assertions successfully.");
+        }
+
+        [Fact]
+        public void BackupPipeline_Execute_MultipleChangedFiles_CreatesSingleCompleteArchive()
+        {
+            var sourceFile1 = Path.Combine(_sourceDirectory, "file1.txt");
+            var nestedDirectory = Path.Combine(_sourceDirectory, "Nested");
+            var sourceFile2 = Path.Combine(nestedDirectory, "file2.txt");
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllText(sourceFile1, "File 1");
+            File.WriteAllText(sourceFile2, "File 2");
+
+            var fileHashes = new ConcurrentDictionary<string, string>();
+            var backupDates = new HashSet<System.DateTime>();
+            var pipeline = BackupPipelineBuilder.BuildBackupPipeline(_sourceDirectory, _backupDestination, fileHashes, backupDates, _logger);
+            var storage = new ComponentStorage();
+            var entities = new List<Entity> { new Entity() };
+
+            var result = pipeline.Execute(entities, storage);
+
+            Assert.True(result.IsSuccess);
+            Assert.Equal(2, fileHashes.Count);
+            Assert.Single(backupDates);
+
+            var backupZip = Assert.Single(Directory.GetFiles(_backupDestination, "*.zip"));
+            using (var archive = ZipFile.OpenRead(backupZip))
+            {
+                Assert.NotNull(archive.GetEntry("file1.txt"));
+                Assert.NotNull(archive.GetEntry("Nested/file2.txt"));
+            }
+        }
+
+        [Fact]
+        public void BackupPipeline_Execute_ResumesPartialArchiveFromCheckpoint()
+        {
+            var sourceFile1 = Path.Combine(_sourceDirectory, "file1.txt");
+            var sourceFile2 = Path.Combine(_sourceDirectory, "file2.txt");
+            File.WriteAllText(sourceFile1, "Already archived");
+            File.WriteAllText(sourceFile2, "Still pending");
+
+            var backupRunState = new BackupRunState(_sourceDirectory, _backupDestination);
+            var backupDate = new DateTime(2026, 5, 13, 1, 2, 3, DateTimeKind.Utc);
+            var partialArchiveName = backupDate.ToString(BackupFolderFormat) + ".zip.partial";
+            var partialArchivePath = Path.Combine(backupRunState.StagingDirectory, partialArchiveName);
+            Directory.CreateDirectory(backupRunState.StagingDirectory);
+
+            using (var archive = ZipFile.Open(partialArchivePath, ZipArchiveMode.Create))
+            {
+                archive.CreateEntryFromFile(sourceFile1, "file1.txt");
+            }
+
+            var checkpoint = new BackupManifest
+            {
+                SourceDirectory = Path.GetFullPath(_sourceDirectory),
+                BackupDestination = Path.GetFullPath(_backupDestination),
+                BackupDate = backupDate,
+                PartialArchiveName = partialArchiveName,
+                StagingArchivePath = partialArchivePath,
+                Files =
+                {
+                    new BackupManifestFile
+                    {
+                        Index = 0,
+                        SourcePath = sourceFile1,
+                        EntryName = "file1.txt",
+                        Hash = HashUtility.ComputeSHA256(sourceFile1)!,
+                        Length = new FileInfo(sourceFile1).Length
+                    }
+                }
+            };
+            File.WriteAllText(
+                Path.Combine(backupRunState.StagingDirectory, "manifest.json"),
+                JsonSerializer.Serialize(checkpoint));
+            File.WriteAllText(
+                Path.Combine(backupRunState.StagingDirectory, "completed.log"),
+                $"0\t{HashUtility.ComputeSHA256(sourceFile1)!}{Environment.NewLine}");
+
+            var fileHashes = new ConcurrentDictionary<string, string>();
+            var backupDates = new HashSet<System.DateTime>();
+            var pipeline = BackupPipelineBuilder.BuildBackupPipeline(_sourceDirectory, _backupDestination, fileHashes, backupDates, _logger);
+            var storage = new ComponentStorage();
+            var entities = new List<Entity> { new Entity() };
+
+            var result = pipeline.Execute(entities, storage);
+
+            Assert.True(result.IsSuccess);
+            Assert.False(File.Exists(partialArchivePath));
+            Assert.False(Directory.Exists(backupRunState.StagingDirectory));
+            Assert.Empty(Directory.GetFiles(_backupDestination, "*.copying"));
+            Assert.Empty(Directory.GetFiles(_backupDestination, "*.partial"));
+            Assert.Contains(backupDate, backupDates);
+            Assert.Equal(2, fileHashes.Count);
+
+            var backupZip = Assert.Single(Directory.GetFiles(_backupDestination, "*.zip"));
+            using (var archive = ZipFile.OpenRead(backupZip))
+            {
+                Assert.NotNull(archive.GetEntry("file1.txt"));
+                Assert.NotNull(archive.GetEntry("file2.txt"));
+            }
         }
 
         // Test 'BackupPipeline_Execute_NoBackup_WhenFilesUnchanged' remains the same

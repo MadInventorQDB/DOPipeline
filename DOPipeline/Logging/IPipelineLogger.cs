@@ -6,4 +6,9 @@ namespace DOPipeline.Logging
     {
         void Log(string message);
     }
+
+    public interface IProgressLogger
+    {
+        void ReportProgress(string message);
+    }
 }

@@ -2,6 +2,7 @@ using DOPipeline.Builders;
 using DOPipeline.Logging; // <-- Added using
 using DOPipeline.Pipeline;
 using DifferentialBackup.Systems;
+using DifferentialBackup.Utilities;
 using System; // Added for DateTime, HashSet
 using System.Collections.Generic;
 using System.Collections.Concurrent; // Added for Dictionary
@@ -30,6 +31,7 @@ namespace DifferentialBackup.Pipeline
             IPipelineLogger logger) // <-- Added logger parameter
         {
             var pipelineBuilder = new PipelineBuilder();
+            var backupRunState = new BackupRunState(sourceDirectory, backupDestination);
 
             pipelineBuilder.WithLogger(logger); // <-- Set the logger
 
@@ -46,12 +48,12 @@ namespace DifferentialBackup.Pipeline
             // Pipe 3: Decide which files need backing up based on hash changes
             pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder
                 .Named("Backup Decision")
-                .AddSystem(new BackupDecisionSystem(fileHashes, backupDates)));
+                .AddSystem(new BackupDecisionSystem(fileHashes, backupDates, backupRunState)));
 
             // Pipe 4: Execute the backup (copy) for files marked for backup
             pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder
                 .Named("Backup Execution")
-                .AddSystem(new BackupExecutionSystem(sourceDirectory, backupDestination)));
+                .AddSystem(new BackupExecutionSystem(sourceDirectory, backupDestination, fileHashes, backupDates, backupRunState, logger)));
 
             // Pipe 5: Compress backup folders into zip archives
             pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder

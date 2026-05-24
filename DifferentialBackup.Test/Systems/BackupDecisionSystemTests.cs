@@ -38,9 +38,30 @@ namespace DifferentialBackup.Test.Systems
             Assert.NotNull(backupDateComponent);
             Assert.True((DateTime.UtcNow - backupDateComponent.BackupDate).TotalSeconds < 5);
 
-            Assert.Contains(@"C:\test\file.txt", fileHashes.Keys);
-            Assert.Equal("newHash", fileHashes[@"C:\test\file.txt"]);
-            Assert.Single(backupDates);
+            Assert.DoesNotContain(@"C:\test\file.txt", fileHashes.Keys);
+            Assert.Empty(backupDates);
+        }
+
+        [Fact]
+        public void Execute_MultipleChangedFilesInExecution_UsesOneBackupDate()
+        {
+            var fileHashes = new ConcurrentDictionary<string, string>();
+            var backupDates = new HashSet<DateTime>();
+            var system = new BackupDecisionSystem(fileHashes, backupDates);
+            var storage = new ComponentStorage();
+
+            var entity1 = CreateChangedFileEntity(storage, @"C:\test\file1.txt", "hash1");
+            var entity2 = CreateChangedFileEntity(storage, @"C:\test\file2.txt", "hash2");
+
+            var result1 = system.Execute(entity1, storage);
+            var result2 = system.Execute(entity2, storage);
+
+            Assert.True(result1.IsSuccess);
+            Assert.True(result2.IsSuccess);
+            Assert.Empty(backupDates);
+            Assert.Equal(
+                storage.GetComponent<BackupDateComponent>(entity1)!.BackupDate,
+                storage.GetComponent<BackupDateComponent>(entity2)!.BackupDate);
         }
 
         [Fact]
@@ -90,6 +111,22 @@ namespace DifferentialBackup.Test.Systems
 
             Assert.False(result.IsSuccess);
             Assert.Equal("Required components missing.", result.ErrorMessage);
+        }
+
+        private static Entity CreateChangedFileEntity(ComponentStorage storage, string path, string hash)
+        {
+            var entity = new Entity();
+            storage.SetComponent(entity, new FileHashComponent
+            {
+                CurrentHash = hash,
+                PreviousHash = null
+            });
+            storage.SetComponent(entity, new FilePathComponent
+            {
+                FilePath = path
+            });
+
+            return entity;
         }
     }
 }

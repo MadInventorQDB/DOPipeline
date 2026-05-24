@@ -34,11 +34,8 @@ namespace DifferentialBackup.Systems
                     foreach (var folder in folders)
                     {
                         var zipPath = folder + ".zip";
-                        if (!File.Exists(zipPath))
-                        {
-                            ZipFile.CreateFromDirectory(folder, zipPath, CompressionLevel.Optimal, false);
-                            Directory.Delete(folder, true);
-                        }
+                        CompressFolder(folder, zipPath);
+                        Directory.Delete(folder, true);
                     }
 
                     return Result.Success();
@@ -47,6 +44,40 @@ namespace DifferentialBackup.Systems
                 {
                     return Result.Fail($"Failed to compress backups: {ex.Message}");
                 }
+            }
+        }
+
+        private static void CompressFolder(string folder, string zipPath)
+        {
+            if (!File.Exists(zipPath))
+            {
+                var tempZipPath = zipPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+
+                try
+                {
+                    ZipFile.CreateFromDirectory(folder, tempZipPath, CompressionLevel.Optimal, false);
+                    File.Move(tempZipPath, zipPath);
+                }
+                finally
+                {
+                    if (File.Exists(tempZipPath))
+                    {
+                        File.Delete(tempZipPath);
+                    }
+                }
+
+                return;
+            }
+
+            using var archive = ZipFile.Open(zipPath, ZipArchiveMode.Update);
+            foreach (var filePath in Directory.GetFiles(folder, "*", SearchOption.AllDirectories))
+            {
+                var entryName = Path.GetRelativePath(folder, filePath)
+                    .Replace(Path.DirectorySeparatorChar, '/')
+                    .Replace(Path.AltDirectorySeparatorChar, '/');
+
+                archive.GetEntry(entryName)?.Delete();
+                archive.CreateEntryFromFile(filePath, entryName, CompressionLevel.Optimal);
             }
         }
     }

@@ -189,6 +189,14 @@ namespace DifferentialBackup
             // Execute the pipeline
             var backupResult = backupPipeline.Execute(entities, storage);
 
+            if (!backupResult.IsSuccess)
+            {
+                _pipelineLogger.Log($"[ERROR] Backup did not complete: {backupResult.ErrorMessage}");
+                Console.WriteLine($"Backup did not complete: {backupResult.ErrorMessage}");
+                Console.WriteLine("A partial archive/checkpoint may remain and will be used by the next backup run.");
+                return;
+            }
+
             // Backup pipeline itself usually returns Success unless there's a fundamental flaw.
             // Individual file backup errors are handled within the BackupExecutionSystem and logged by the pipeline runner.
             // We check the backupDates set to see if any new backup actually occurred.
