@@ -28,10 +28,13 @@ namespace DifferentialBackup.Pipeline
             string backupDestination,
             ConcurrentDictionary<string, string> fileHashes,
             HashSet<DateTime> backupDates,
-            IPipelineLogger logger) // <-- Added logger parameter
+            IPipelineLogger logger,
+            BackupRunState? backupRunState = null,
+            BackupBatchOptions? batchOptions = null)
         {
             var pipelineBuilder = new PipelineBuilder();
-            var backupRunState = new BackupRunState(sourceDirectory, backupDestination);
+            backupRunState ??= new BackupRunState(sourceDirectory, backupDestination);
+            batchOptions ??= new BackupBatchOptions();
 
             pipelineBuilder.WithLogger(logger); // <-- Set the logger
 
@@ -50,15 +53,25 @@ namespace DifferentialBackup.Pipeline
                 .Named("Backup Decision")
                 .AddSystem(new BackupDecisionSystem(fileHashes, backupDates, backupRunState)));
 
-            // Pipe 4: Execute the backup (copy) for files marked for backup
+            // Pipe 4: Convert changed file data into deterministic backup part entities
             pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder
-                .Named("Backup Execution")
-                .AddSystem(new BackupExecutionSystem(sourceDirectory, backupDestination, fileHashes, backupDates, backupRunState, logger)));
+                .Named("Backup Part Planning")
+                .AddSystem(new BackupPartPlanningSystem(
+                    sourceDirectory,
+                    backupDestination,
+                    backupRunState,
+                    batchOptions,
+                    logger)));
 
-            // Pipe 5: Compress backup folders into zip archives
+            // Pipe 5: Stage parts locally and transfer completed parts through a bounded queue
             pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder
-                .Named("Backup Compression")
-                .AddSystem(new BackupCompressionSystem(backupDestination)));
+                .Named("Backup Part Execution")
+                .AddSystem(new BackupExecutionSystem(backupRunState, batchOptions, logger)));
+
+            // Pipe 6: Publish the manifest and atomically expose the completed backup set
+            pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder
+                .Named("Backup Publication")
+                .AddSystem(new BackupPublicationSystem(fileHashes, backupDates, backupRunState, logger)));
 
             return pipelineBuilder.Build();
         }

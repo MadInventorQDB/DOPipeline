@@ -1,211 +1,211 @@
-
-using Xunit;
+using DifferentialBackup.Components;
 using DifferentialBackup.Systems;
+using DifferentialBackup.Test.Helpers;
+using DifferentialBackup.Utilities;
 using DOPipeline.Entities;
 using DOPipeline.Storage;
-using DifferentialBackup.Components;
-using System.IO;
 using System.IO.Compression;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
+using Xunit;
 
 namespace DifferentialBackup.Test.Systems
 {
-    public class BackupExecutionSystemTests
+    public sealed class BackupExecutionSystemTests : IDisposable
     {
-        [Fact]
-        public void Execute_BackupsFileWhenBackupDateComponentExists()
+        private readonly string _basePath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        private readonly string _sourceDirectory;
+        private readonly string _backupDestination;
+        private readonly BackupRunState _runState;
+        private readonly BackupBatchOptions _options = new()
         {
-            var sourceDirectory = Path.Combine(Path.GetTempPath(), "Source");
-            var backupDestination = Path.Combine(Path.GetTempPath(), "Backup");
-            Directory.CreateDirectory(sourceDirectory);
-            Directory.CreateDirectory(backupDestination);
+            MaxSourceBytesPerPart = 1024,
+            MaxFilesPerPart = 10,
+            TransferQueueCapacity = 2,
+            CopyBufferSize = 64 * 1024
+        };
 
-            var sourceFile = Path.Combine(sourceDirectory, "file.txt");
-            File.WriteAllText(sourceFile, "Test Content");
+        public BackupExecutionSystemTests()
+        {
+            _sourceDirectory = Path.Combine(_basePath, "Source");
+            _backupDestination = Path.Combine(_basePath, "Backup");
+            Directory.CreateDirectory(_sourceDirectory);
+            Directory.CreateDirectory(_backupDestination);
+            _runState = new BackupRunState(
+                _sourceDirectory,
+                _backupDestination,
+                Path.Combine(_basePath, "Staging"));
+            _runState.BeginRun();
+        }
 
-            var backupDate = System.DateTime.UtcNow;
-            var fileHashes = new ConcurrentDictionary<string, string>();
-            var backupDates = new HashSet<System.DateTime>();
-
-            var system = new BackupExecutionSystem(sourceDirectory, backupDestination, fileHashes, backupDates);
-            var compressionSystem = new BackupCompressionSystem(backupDestination);
-
-            var entity = new Entity();
-            var storage = new ComponentStorage();
-            storage.SetComponent(entity, new FilePathComponent { FilePath = sourceFile });
-            storage.SetComponent(entity, new FileHashComponent { CurrentHash = "hash", PreviousHash = null });
-            storage.SetComponent(entity, new BackupDateComponent { BackupDate = backupDate });
-
-            var beginResult = system.BeginExecution(new[] { entity }, storage);
-            var result = system.Execute(entity, storage);
-            var endResult = system.EndExecution(new[] { entity }, storage);
-            compressionSystem.Execute(entity, storage);
-            Assert.True(beginResult.IsSuccess);
-            Assert.True(endResult.IsSuccess);
-            var backupZipPath = Assert.Single(Directory.GetFiles(backupDestination, "*.zip"));
-            Assert.True(File.Exists(backupZipPath));
-            Assert.Equal("hash", fileHashes[sourceFile]);
-            Assert.Single(backupDates);
-
-            using (var archive = ZipFile.OpenRead(backupZipPath))
+        [Fact]
+        public void Execute_CreatesEachArchiveOnceAndTransfersItToWorkingDirectory()
+        {
+            var sourceFile = Path.Combine(_sourceDirectory, "nested", "file.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(sourceFile)!);
+            File.WriteAllText(sourceFile, "backup content");
+            var fixture = CreateFixture(new[]
             {
-                Assert.NotNull(archive.GetEntry("file.txt"));
+                new BackupPartFile(sourceFile, "nested/file.txt", "hash-1", new FileInfo(sourceFile).Length)
+            });
+
+            var system = new BackupExecutionSystem(_runState, _options, NullLogger.Instance);
+            var result = system.Execute(fixture.Storage.GetAllEntities(), fixture.Storage);
+
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            Assert.Equal(BackupPartState.Transferred, fixture.Status.State);
+            Assert.True(File.Exists(fixture.Status.DestinationArchivePath));
+            Assert.False(File.Exists(fixture.Status.LocalArchivePath));
+            Assert.True(File.Exists(_runState.GetPartCheckpointPath(1)));
+
+            using var archive = ZipFile.OpenRead(fixture.Status.DestinationArchivePath);
+            var entry = Assert.Single(archive.Entries);
+            Assert.Equal("nested/file.txt", entry.FullName);
+            using var reader = new StreamReader(entry.Open());
+            Assert.Equal("backup content", reader.ReadToEnd());
+        }
+
+        [Fact]
+        public void Execute_RebuildsOnlyTheInterruptedPartAndIncompleteCopy()
+        {
+            var sourceFile = Path.Combine(_sourceDirectory, "file.txt");
+            File.WriteAllText(sourceFile, "complete content");
+            var fixture = CreateFixture(new[]
+            {
+                new BackupPartFile(sourceFile, "file.txt", "hash-1", new FileInfo(sourceFile).Length)
+            });
+            Directory.CreateDirectory(Path.GetDirectoryName(fixture.Status.LocalArchivePath)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(fixture.Status.DestinationArchivePath)!);
+            File.WriteAllText(fixture.Status.LocalArchivePath + ".partial", "broken zip");
+            File.WriteAllText(fixture.Status.DestinationArchivePath + ".copying", "partial copy");
+
+            var system = new BackupExecutionSystem(_runState, _options, NullLogger.Instance);
+            var result = system.Execute(fixture.Storage.GetAllEntities(), fixture.Storage);
+
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            Assert.False(File.Exists(fixture.Status.LocalArchivePath + ".partial"));
+            Assert.False(File.Exists(fixture.Status.DestinationArchivePath + ".copying"));
+            using var archive = ZipFile.OpenRead(fixture.Status.DestinationArchivePath);
+            Assert.NotNull(archive.GetEntry("file.txt"));
+        }
+
+        [Fact]
+        public void Execute_ReusesAValidatedDestinationPartWithoutReadingSourceAgain()
+        {
+            var missingSource = Path.Combine(_sourceDirectory, "no-longer-readable.txt");
+            var fixture = CreateFixture(new[]
+            {
+                new BackupPartFile(missingSource, "file.txt", "hash-1", 7)
+            });
+            Directory.CreateDirectory(Path.GetDirectoryName(fixture.Status.DestinationArchivePath)!);
+            using (var archive = ZipFile.Open(fixture.Status.DestinationArchivePath, ZipArchiveMode.Create))
+            {
+                var entry = archive.CreateEntry("file.txt");
+                using var writer = new StreamWriter(entry.Open());
+                writer.Write("content");
             }
 
-            Directory.Delete(sourceDirectory, true);
-            Directory.Delete(backupDestination, true);
-        }
-
-        [Fact]
-        public void Execute_SkipsBackupWhenNoBackupDateComponent()
-        {
-            // Arrange
-            var sourceDirectory = Path.Combine(Path.GetTempPath(), "Source");
-            var backupDestination = Path.Combine(Path.GetTempPath(), "Backup");
-
-            // Ensure directories are clean
-            if (Directory.Exists(sourceDirectory))
-                Directory.Delete(sourceDirectory, true);
-            if (Directory.Exists(backupDestination))
-                Directory.Delete(backupDestination, true);
-
-            Directory.CreateDirectory(sourceDirectory);
-            Directory.CreateDirectory(backupDestination);
-
-            var sourceFile = Path.Combine(sourceDirectory, "file.txt");
-            File.WriteAllText(sourceFile, "Test Content");
-
-            var system = new BackupExecutionSystem(sourceDirectory, backupDestination);
-            var compressionSystem = new BackupCompressionSystem(backupDestination);
-
-            var entity = new Entity();
-            var storage = new ComponentStorage();
-            storage.SetComponent(entity, new FilePathComponent { FilePath = sourceFile });
-
-            // Act
-            var result = system.Execute(entity, storage);
-            compressionSystem.Execute(entity, storage);
-
-            // Assert
-            Assert.True(result.IsSuccess);
-
-            // Check if any backup archives were created
-            var backupZips = Directory.GetFiles(backupDestination, "*.zip");
-            Assert.Empty(backupZips);
-
-            // Clean up
-            Directory.Delete(sourceDirectory, true);
-            Directory.Delete(backupDestination, true);
-        }
-
-        [Fact]
-        public void Execute_MissingFilePathComponent_ReturnsFailure()
-        {
-            var sourceDirectory = Path.Combine(Path.GetTempPath(), "Source");
-            var backupDestination = Path.Combine(Path.GetTempPath(), "Backup");
-            Directory.CreateDirectory(sourceDirectory);
-            Directory.CreateDirectory(backupDestination);
-
-            var backupDate = System.DateTime.UtcNow;
-
-            var system = new BackupExecutionSystem(sourceDirectory, backupDestination);
-
-            var entity = new Entity();
-            var compressionSystem = new BackupCompressionSystem(backupDestination);
-            var storage = new ComponentStorage();
-            storage.SetComponent(entity, new BackupDateComponent { BackupDate = backupDate });
-
-            var result = system.Execute(entity, storage);
-            compressionSystem.Execute(entity, storage);
-
-            Assert.False(result.IsSuccess);
-            Assert.Equal("FilePathComponent missing.", result.ErrorMessage);
-
-            var zips = Directory.GetFiles(backupDestination, "*.zip");
-            Assert.Empty(zips);
-
-            Directory.Delete(sourceDirectory, true);
-            Directory.Delete(backupDestination, true);
-        }
-
-        [Fact]
-        public void Compression_MergesFolderWhenZipAlreadyExists()
-        {
-            var backupDestination = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
-            var backupFolder = Path.Combine(backupDestination, "20250101010101");
-            var backupZipPath = backupFolder + ".zip";
-
-            Directory.CreateDirectory(backupFolder);
-            File.WriteAllText(Path.Combine(backupFolder, "first.txt"), "First");
-
-            var compressionSystem = new BackupCompressionSystem(backupDestination);
-            var storage = new ComponentStorage();
-            var entity = new Entity();
-
-            var firstResult = compressionSystem.Execute(entity, storage);
-            Assert.True(firstResult.IsSuccess);
-            Assert.True(File.Exists(backupZipPath));
-            Assert.False(Directory.Exists(backupFolder));
-
-            Directory.CreateDirectory(backupFolder);
-            File.WriteAllText(Path.Combine(backupFolder, "second.txt"), "Second");
-
-            var secondResult = compressionSystem.Execute(entity, storage);
-
-            Assert.True(secondResult.IsSuccess);
-            Assert.False(Directory.Exists(backupFolder));
-
-            using (var archive = ZipFile.OpenRead(backupZipPath))
+            var archiveBytes = new FileInfo(fixture.Status.DestinationArchivePath).Length;
+            _runState.SavePartCheckpoint(new BackupPartCheckpoint
             {
-                Assert.NotNull(archive.GetEntry("first.txt"));
-                Assert.NotNull(archive.GetEntry("second.txt"));
-            }
+                PartNumber = 1,
+                ArchiveFileName = fixture.Part.ArchiveFileName,
+                Fingerprint = fixture.Part.Fingerprint,
+                FileCount = 1,
+                SourceBytes = 7,
+                ArchiveBytes = archiveBytes
+            });
 
-            Directory.Delete(backupDestination, true);
+            var system = new BackupExecutionSystem(_runState, _options, NullLogger.Instance);
+            var result = system.Execute(fixture.Storage.GetAllEntities(), fixture.Storage);
+
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            Assert.Equal(BackupPartState.Transferred, fixture.Status.State);
+            Assert.Equal(archiveBytes, fixture.Status.ArchiveBytes);
         }
 
         [Fact]
-        public void Execute_StoresPreCompressedFileWithoutRecompressing()
+        public void Execute_StoresPreCompressedFilesWithoutRecompressing()
         {
-            var sourceDirectory = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
-            var backupDestination = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
-            Directory.CreateDirectory(sourceDirectory);
-            Directory.CreateDirectory(backupDestination);
-
-            var sourceFile = Path.Combine(sourceDirectory, "photo.jpg");
+            var sourceFile = Path.Combine(_sourceDirectory, "photo.jpg");
             var bytes = Enumerable.Range(0, 4096).Select(i => (byte)(i % 251)).ToArray();
             File.WriteAllBytes(sourceFile, bytes);
-
-            var fileHashes = new ConcurrentDictionary<string, string>();
-            var backupDates = new HashSet<System.DateTime>();
-            var system = new BackupExecutionSystem(sourceDirectory, backupDestination, fileHashes, backupDates);
-
-            var entity = new Entity();
-            var storage = new ComponentStorage();
-            storage.SetComponent(entity, new FilePathComponent { FilePath = sourceFile });
-            storage.SetComponent(entity, new FileHashComponent { CurrentHash = "hash", PreviousHash = null });
-            storage.SetComponent(entity, new BackupDateComponent { BackupDate = System.DateTime.UtcNow });
-
-            var beginResult = system.BeginExecution(new[] { entity }, storage);
-            var result = system.Execute(entity, storage);
-            var endResult = system.EndExecution(new[] { entity }, storage);
-
-            Assert.True(beginResult.IsSuccess);
-            Assert.True(result.IsSuccess);
-            Assert.True(endResult.IsSuccess);
-
-            var backupZipPath = Assert.Single(Directory.GetFiles(backupDestination, "*.zip"));
-            using (var archive = ZipFile.OpenRead(backupZipPath))
+            var fixture = CreateFixture(new[]
             {
-                var entry = archive.GetEntry("photo.jpg");
-                Assert.NotNull(entry);
-                Assert.Equal(bytes.Length, entry.Length);
-                Assert.Equal(entry.Length, entry.CompressedLength);
+                new BackupPartFile(sourceFile, "photo.jpg", "hash-1", bytes.Length)
+            });
+
+            var system = new BackupExecutionSystem(_runState, _options, NullLogger.Instance);
+            var result = system.Execute(fixture.Storage.GetAllEntities(), fixture.Storage);
+
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            using var archive = ZipFile.OpenRead(fixture.Status.DestinationArchivePath);
+            var entry = Assert.Single(archive.Entries);
+            Assert.Equal(entry.Length, entry.CompressedLength);
+        }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(_basePath))
+            {
+                Directory.Delete(_basePath, true);
             }
 
-            Directory.Delete(sourceDirectory, true);
-            Directory.Delete(backupDestination, true);
+            GC.SuppressFinalize(this);
         }
+
+        private ExecutionFixture CreateFixture(IReadOnlyList<BackupPartFile> files)
+        {
+            var backupDate = new DateTime(2026, 8, 20, 12, 0, 0, DateTimeKind.Utc);
+            var part = new BackupPartComponent
+            {
+                PartNumber = 1,
+                BackupDate = backupDate,
+                ArchiveFileName = "part-000001.zip",
+                Fingerprint = "part-fingerprint",
+                SourceBytes = files.Sum(file => file.Length),
+                Files = files
+            };
+            var workingDirectory = Path.Combine(_backupDestination, "20260820120000.backup.copying");
+            var finalDirectory = Path.Combine(_backupDestination, "20260820120000.backup");
+            var status = new BackupPartStatusComponent
+            {
+                State = BackupPartState.Planned,
+                LocalArchivePath = Path.Combine(_runState.StagingDirectory, part.ArchiveFileName),
+                DestinationArchivePath = Path.Combine(workingDirectory, part.ArchiveFileName)
+            };
+            var run = new BackupRunComponent
+            {
+                BackupDate = backupDate,
+                SourceDirectory = _sourceDirectory,
+                BackupDestination = _backupDestination,
+                StagingDirectory = _runState.StagingDirectory,
+                WorkingDirectory = workingDirectory,
+                FinalDirectory = finalDirectory,
+                PlanFingerprint = "plan-fingerprint",
+                TotalParts = 1,
+                TotalFiles = files.Count,
+                SourceBytes = part.SourceBytes
+            };
+
+            _runState.CreateOrUpdateJob(
+                backupDate,
+                _options,
+                run.PlanFingerprint,
+                1,
+                files.Count,
+                part.SourceBytes);
+
+            var storage = new ComponentStorage();
+            var runEntity = new Entity();
+            storage.SetComponent(runEntity, run);
+            var partEntity = new Entity();
+            storage.SetComponent(partEntity, part);
+            storage.SetComponent(partEntity, status);
+            return new ExecutionFixture(storage, part, status);
+        }
+
+        private sealed record ExecutionFixture(
+            ComponentStorage Storage,
+            BackupPartComponent Part,
+            BackupPartStatusComponent Status);
     }
 }

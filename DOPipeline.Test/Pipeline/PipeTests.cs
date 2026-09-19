@@ -108,5 +108,65 @@ namespace DOPipeline.Test.Pipeline
             // *** Corrected Assertion ***
             Assert.Equal("Component missing.", error2.ErrorMessage);
         }
+
+        [Fact]
+        public void Execute_CallsEntitySetSystemOnceWithTheCurrentDataSet()
+        {
+            var pipe = new Pipe("Set Pipe");
+            var system = new CountingEntitySetSystem();
+            pipe.AddSystem(system);
+            var storage = new ComponentStorage();
+            var entities = new[] { new Entity(), new Entity(), new Entity() };
+
+            var result = pipe.Execute(entities, storage);
+
+            Assert.True(result.IsSuccess);
+            Assert.Equal(1, system.ExecutionCount);
+            Assert.Equal(3, system.EntityCount);
+        }
+
+        [Fact]
+        public void Execute_StopsWhenEntitySetSystemFails()
+        {
+            var pipe = new Pipe("Set Pipe");
+            pipe.AddSystem(new FailingEntitySetSystem());
+
+            var result = pipe.Execute(new[] { new Entity() }, new ComponentStorage());
+
+            Assert.False(result.IsSuccess);
+            Assert.Equal("Set failed.", result.ErrorMessage);
+        }
+
+        private sealed class CountingEntitySetSystem : IEntitySetSystem
+        {
+            public int ExecutionCount { get; private set; }
+
+            public int EntityCount { get; private set; }
+
+            public Result Execute(IReadOnlyList<Entity> entities, IComponentStorage storage)
+            {
+                ExecutionCount++;
+                EntityCount = entities.Count;
+                return Result.Success();
+            }
+
+            public Result Execute(Entity entity, IComponentStorage storage)
+            {
+                return Result.Fail("Entity execution should not be used for a set system.");
+            }
+        }
+
+        private sealed class FailingEntitySetSystem : IEntitySetSystem
+        {
+            public Result Execute(IReadOnlyList<Entity> entities, IComponentStorage storage)
+            {
+                return Result.Fail("Set failed.");
+            }
+
+            public Result Execute(Entity entity, IComponentStorage storage)
+            {
+                return Result.Fail("Entity execution should not be used for a set system.");
+            }
+        }
     }
 }

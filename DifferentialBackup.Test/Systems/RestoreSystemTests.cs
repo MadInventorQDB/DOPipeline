@@ -1,85 +1,126 @@
-using Xunit;
 using DifferentialBackup.Systems;
+using DifferentialBackup.Utilities;
 using DOPipeline.Entities;
 using DOPipeline.Storage;
-using System.IO;
-using System;
 using System.IO.Compression;
+using System.Text.Json;
+using Xunit;
 
 namespace DifferentialBackup.Test.Systems
 {
-    public class RestoreSystemTests
+    public sealed class RestoreSystemTests : IDisposable
     {
-        [Fact]
-        public void Execute_RestoresFilesFromBackup()
+        private readonly string _basePath = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        private readonly string _backupDestination;
+        private readonly string _restoreDestination;
+
+        public RestoreSystemTests()
         {
-            // Arrange
-            var backupDestination = Path.Combine(Path.GetTempPath(), "Backup");
-            var restoreDestination = Path.Combine(Path.GetTempPath(), "Restore");
-            Directory.CreateDirectory(backupDestination);
-            Directory.CreateDirectory(restoreDestination);
+            _backupDestination = Path.Combine(_basePath, "Backup");
+            _restoreDestination = Path.Combine(_basePath, "Restore");
+            Directory.CreateDirectory(_backupDestination);
+            Directory.CreateDirectory(_restoreDestination);
+        }
 
-            var backupDate = DateTime.UtcNow;
-            var backupZipName = backupDate.ToString("yyyyMMddHHmmss") + ".zip";
-            var backupZipPath = Path.Combine(backupDestination, backupZipName);
+        [Fact]
+        public void Execute_RestoresLegacySingleZipBackup()
+        {
+            var backupDate = new DateTime(2026, 8, 20, 15, 0, 0, DateTimeKind.Utc);
+            var archivePath = Path.Combine(
+                _backupDestination,
+                backupDate.ToString("yyyyMMddHHmmss") + ".zip");
+            CreateArchive(archivePath, ("file.txt", "legacy content"));
 
-            var tempFile = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
-            File.WriteAllText(tempFile, "Backup Content");
-            using (var archive = ZipFile.Open(backupZipPath, ZipArchiveMode.Create))
+            var system = new RestoreSystem(_backupDestination, backupDate, _restoreDestination);
+            var result = system.Execute(new Entity(), new ComponentStorage());
+
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            Assert.Equal("legacy content", File.ReadAllText(Path.Combine(_restoreDestination, "file.txt")));
+        }
+
+        [Fact]
+        public void Execute_RestoresAllPartsFromManifestInOrder()
+        {
+            var backupDate = new DateTime(2026, 8, 20, 15, 1, 0, DateTimeKind.Utc);
+            var backupSet = Path.Combine(
+                _backupDestination,
+                backupDate.ToString("yyyyMMddHHmmss") + ".backup");
+            Directory.CreateDirectory(backupSet);
+            var firstPart = Path.Combine(backupSet, "part-000001.zip");
+            var secondPart = Path.Combine(backupSet, "part-000002.zip");
+            CreateArchive(firstPart, ("first.txt", "first"));
+            CreateArchive(secondPart, ("nested/second.txt", "second"));
+            var manifest = new BackupManifest
             {
-                archive.CreateEntryFromFile(tempFile, "file.txt");
-            }
-            File.Delete(tempFile);
+                SourceDirectory = "C:\\Source",
+                BackupDate = backupDate,
+                PlanFingerprint = "plan",
+                FileCount = 2,
+                SourceBytes = 11,
+                Parts =
+                {
+                    CreateManifestPart(1, firstPart, 1),
+                    CreateManifestPart(2, secondPart, 1)
+                }
+            };
+            File.WriteAllText(
+                Path.Combine(backupSet, "manifest.json"),
+                JsonSerializer.Serialize(manifest));
 
-            var system = new RestoreSystem(backupDestination, backupDate, restoreDestination);
+            var system = new RestoreSystem(_backupDestination, backupDate, _restoreDestination);
+            var result = system.Execute(new Entity(), new ComponentStorage());
 
-            var entity = new Entity();
-            var storage = new ComponentStorage();
-
-            // Act
-            var result = system.Execute(entity, storage);
-
-            // Assert
-            Assert.True(result.IsSuccess);
-            var restoredFile = Path.Combine(restoreDestination, "file.txt");
-            Assert.True(File.Exists(restoredFile));
-            var content = File.ReadAllText(restoredFile);
-            Assert.Equal("Backup Content", content);
-
-            // Clean up
-            Directory.Delete(backupDestination, true);
-            Directory.Delete(restoreDestination, true);
+            Assert.True(result.IsSuccess, result.ErrorMessage);
+            Assert.Equal("first", File.ReadAllText(Path.Combine(_restoreDestination, "first.txt")));
+            Assert.Equal("second", File.ReadAllText(Path.Combine(_restoreDestination, "nested", "second.txt")));
         }
 
         [Fact]
         public void Execute_BackupDateNotFound_ReturnsFailure()
         {
-            // Arrange
-            var backupDestination = Path.Combine(Path.GetTempPath(), "Backup");
-            var restoreDestination = Path.Combine(Path.GetTempPath(), "Restore");
+            var system = new RestoreSystem(
+                _backupDestination,
+                new DateTime(2026, 8, 20, 15, 2, 0, DateTimeKind.Utc),
+                _restoreDestination);
 
-            // Ensure directories are created
-            Directory.CreateDirectory(backupDestination);
-            Directory.CreateDirectory(restoreDestination);
+            var result = system.Execute(new Entity(), new ComponentStorage());
 
-            var backupDate = DateTime.UtcNow;
-
-            // Do not create backup archive for the given date to simulate missing backup
-            var system = new RestoreSystem(backupDestination, backupDate, restoreDestination);
-
-            var entity = new Entity();
-            var storage = new ComponentStorage();
-
-            // Act
-            var result = system.Execute(entity, storage);
-
-            // Assert
             Assert.False(result.IsSuccess);
             Assert.Equal("Backup date not found.", result.ErrorMessage);
+        }
 
-            // Clean up
-            Directory.Delete(backupDestination, true);
-            Directory.Delete(restoreDestination, true);
+        public void Dispose()
+        {
+            if (Directory.Exists(_basePath))
+            {
+                Directory.Delete(_basePath, true);
+            }
+
+            GC.SuppressFinalize(this);
+        }
+
+        private static void CreateArchive(string path, params (string Name, string Content)[] entries)
+        {
+            using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+            foreach (var definition in entries)
+            {
+                var entry = archive.CreateEntry(definition.Name);
+                using var writer = new StreamWriter(entry.Open());
+                writer.Write(definition.Content);
+            }
+        }
+
+        private static BackupManifestPart CreateManifestPart(int partNumber, string path, int fileCount)
+        {
+            return new BackupManifestPart
+            {
+                PartNumber = partNumber,
+                ArchiveFileName = Path.GetFileName(path),
+                Fingerprint = "part-" + partNumber,
+                FileCount = fileCount,
+                SourceBytes = 5,
+                ArchiveBytes = new FileInfo(path).Length
+            };
         }
     }
 }

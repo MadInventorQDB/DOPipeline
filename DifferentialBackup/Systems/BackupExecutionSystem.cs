@@ -1,401 +1,498 @@
 using DOPipeline.Entities;
+using DOPipeline.Logging;
 using DOPipeline.Storage;
 using DOPipeline.Systems;
 using DOPipeline.Utilities;
 using DifferentialBackup.Components;
 using DifferentialBackup.Utilities;
-using DOPipeline.Logging;
-using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.IO.Compression;
-using System.Linq;
+using System.Text.Json;
+using System.Threading.Channels;
 
 namespace DifferentialBackup.Systems
 {
-    public class BackupExecutionSystem : ISystem, IExecutionScopedSystem
+    public sealed class BackupExecutionSystem : IEntitySetSystem
     {
-        private readonly string _sourceDirectory;
-        private readonly string _backupDestination;
-        private readonly ConcurrentDictionary<string, string> _fileHashes;
-        private readonly HashSet<DateTime> _backupDates;
-        private readonly BackupRunState _backupRunState;
+        private readonly BackupRunState _runState;
+        private readonly BackupBatchOptions _options;
         private readonly IPipelineLogger? _logger;
-        private readonly object _archiveLock = new();
-        private readonly object _backupDatesLock = new();
-        private List<BackupFilePlan> _plannedFiles = new();
-        private BackupManifest? _manifest;
-        private Dictionary<int, string> _completedFiles = new();
-        private string? _partialArchivePath;
-        private string? _finalArchivePath;
-        private long _totalBytesToWrite;
-        private long _bytesWritten;
-        private int _filesWrittenOrSkipped;
-        private int _filesToWriteOrSkip;
-        private int _failureCount;
-        private Stopwatch _stopwatch = new();
-        private DateTime _lastProgressLogUtc = DateTime.MinValue;
 
         public BackupExecutionSystem(
-            string sourceDirectory,
-            string backupDestination,
-            ConcurrentDictionary<string, string>? fileHashes = null,
-            HashSet<DateTime>? backupDates = null,
-            BackupRunState? backupRunState = null,
+            BackupRunState runState,
+            BackupBatchOptions options,
             IPipelineLogger? logger = null)
         {
-            _sourceDirectory = sourceDirectory;
-            _backupDestination = backupDestination;
-            _fileHashes = fileHashes ?? new ConcurrentDictionary<string, string>();
-            _backupDates = backupDates ?? new HashSet<DateTime>();
-            _backupRunState = backupRunState ?? new BackupRunState(sourceDirectory, backupDestination);
+            _runState = runState;
+            _options = options;
             _logger = logger;
+            _options.Validate();
         }
 
-        public Result BeginExecution(IEnumerable<Entity> entities, IComponentStorage storage)
+        public Result Execute(IReadOnlyList<Entity> entities, IComponentStorage storage)
         {
-            _plannedFiles = entities
-                .Select(entity => CreatePlan(entity, storage))
-                .Where(plan => plan != null)
-                .Cast<BackupFilePlan>()
-                .ToList();
+            BackupRunComponent? run = null;
+            var parts = new List<PartEntity>();
+            foreach (var entity in entities)
+            {
+                run ??= storage.GetComponent<BackupRunComponent>(entity);
+                var part = storage.GetComponent<BackupPartComponent>(entity);
+                if (part == null)
+                {
+                    continue;
+                }
 
-            _failureCount = 0;
-            _bytesWritten = 0;
-            _filesWrittenOrSkipped = 0;
-            _filesToWriteOrSkip = _plannedFiles.Count;
-            _totalBytesToWrite = _plannedFiles.Sum(plan => plan.Length);
-            _stopwatch = Stopwatch.StartNew();
-            _lastProgressLogUtc = DateTime.MinValue;
+                var status = storage.GetComponent<BackupPartStatusComponent>(entity);
+                if (status != null)
+                {
+                    parts.Add(new PartEntity(part, status));
+                }
+            }
 
-            if (_plannedFiles.Count == 0)
+            if (run == null)
             {
                 return Result.Success();
+            }
+
+            parts.Sort((left, right) => left.Part.PartNumber.CompareTo(right.Part.PartNumber));
+
+            if (parts.Count != run.TotalParts)
+            {
+                return Result.Fail($"Expected {run.TotalParts} backup part entities but found {parts.Count}.");
             }
 
             try
             {
-                Directory.CreateDirectory(_backupDestination);
-                var backupDate = _backupRunState.GetOrCreateBackupDate(_plannedFiles[0].BackupDate);
-                _manifest = _backupRunState.CreateOrUpdateManifest(
-                    backupDate,
-                    _plannedFiles.Select(plan => new BackupManifestFile
+                if (TryUsePublishedBackup(run, parts, out var publishedError))
+                {
+                    _logger?.Log($"Backup Execution: recovered published backup '{run.FinalDirectory}'.");
+                    return Result.Success();
+                }
+
+                if (publishedError != null)
+                {
+                    return Result.Fail(publishedError);
+                }
+
+                Directory.CreateDirectory(run.StagingDirectory);
+                Directory.CreateDirectory(run.WorkingDirectory);
+
+                var progress = new BackupProgressTracker(
+                    run.SourceBytes,
+                    run.TotalParts,
+                    _logger);
+                var pendingParts = new List<PartEntity>();
+
+                foreach (var item in parts)
+                {
+                    PreparePart(item, run, progress);
+                    if (item.Status.State != BackupPartState.Transferred)
                     {
-                        SourcePath = plan.FilePath,
-                        EntryName = plan.EntryName,
-                        Hash = plan.Hash,
-                        Length = plan.Length
-                    }).ToList());
+                        pendingParts.Add(item);
+                    }
+                }
 
-                _plannedFiles = AssignManifestIndexes(_plannedFiles, _manifest);
-                _completedFiles = _backupRunState.LoadCompletedFiles();
-                _partialArchivePath = _manifest.StagingArchivePath;
-                _finalArchivePath = Path.Combine(_backupDestination, backupDate.ToString("yyyyMMddHHmmss") + ".zip");
+                if (pendingParts.Count == 0)
+                {
+                    progress.Report(force: true);
+                    return Result.Success();
+                }
 
-                EnsureUsablePartialArchive();
-                _logger?.Log($"Backup Execution: writing {_plannedFiles.Count} changed file(s), {_totalBytesToWrite / 1024d / 1024d:0.0} MB total.");
-                _logger?.Log($"Backup Execution: staging archive at '{_partialArchivePath}'.");
+                EnsureLocalStagingCapacity(run, pendingParts);
 
-                return Result.Success();
+                var channel = Channel.CreateBounded<PartEntity>(new BoundedChannelOptions(_options.TransferQueueCapacity)
+                {
+                    SingleReader = true,
+                    SingleWriter = true,
+                    FullMode = BoundedChannelFullMode.Wait
+                });
+                using var localPartSlots = new SemaphoreSlim(_options.TransferQueueCapacity + 1);
+                using var cancellation = new CancellationTokenSource();
+                var transferTask = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await TransferPartsAsync(
+                            channel.Reader,
+                            run,
+                            progress,
+                            localPartSlots,
+                            cancellation.Token);
+                    }
+                    catch
+                    {
+                        cancellation.Cancel();
+                        throw;
+                    }
+                });
+
+                Exception? producerError = null;
+                try
+                {
+                    foreach (var item in pendingParts)
+                    {
+                        cancellation.Token.ThrowIfCancellationRequested();
+                        localPartSlots.Wait(cancellation.Token);
+                        var slotOwnedByProducer = true;
+                        try
+                        {
+                            if (item.Status.State == BackupPartState.Planned)
+                            {
+                                CompressPart(item, progress);
+                            }
+
+                            channel.Writer
+                                .WriteAsync(item, cancellation.Token)
+                                .AsTask()
+                                .GetAwaiter()
+                                .GetResult();
+                            slotOwnedByProducer = false;
+                        }
+                        finally
+                        {
+                            if (slotOwnedByProducer)
+                            {
+                                localPartSlots.Release();
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    producerError = ex;
+                    cancellation.Cancel();
+                }
+                finally
+                {
+                    channel.Writer.TryComplete(producerError);
+                }
+
+                Exception? transferError = null;
+                try
+                {
+                    transferTask.GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    transferError = ex;
+                }
+
+                progress.Report(force: true);
+                var error = transferError ?? producerError;
+                return error == null
+                    ? Result.Success()
+                    : Result.Fail($"Backup parts remain resumable after an execution failure: {error.Message}");
             }
             catch (Exception ex)
             {
-                return Result.Fail($"Failed to prepare backup archive: {ex.Message}");
+                return Result.Fail($"Failed to execute backup parts: {ex.Message}");
             }
         }
 
         public Result Execute(Entity entity, IComponentStorage storage)
         {
-            var backupDateComponent = storage.GetComponent<BackupDateComponent>(entity);
-            var filePathComponent = storage.GetComponent<FilePathComponent>(entity);
+            return Result.Fail("Backup part execution requires entity-set execution.");
+        }
 
-            if (backupDateComponent == null)
+        private bool TryUsePublishedBackup(
+            BackupRunComponent run,
+            IReadOnlyList<PartEntity> parts,
+            out string? error)
+        {
+            error = null;
+            if (!Directory.Exists(run.FinalDirectory))
             {
-                // No backup needed for this entity
-                return Result.Success();
+                return false;
             }
-
-            if (filePathComponent == null)
-                return Result.Fail("FilePathComponent missing.");
 
             try
             {
-                var relativePath = Path.GetRelativePath(_sourceDirectory, filePathComponent.FilePath);
-                var entryName = NormalizeZipEntryName(relativePath);
-                var currentHash = storage.GetComponent<FileHashComponent>(entity)?.CurrentHash;
-                var plan = _plannedFiles.FirstOrDefault(plannedFile =>
-                    string.Equals(plannedFile.EntryName, entryName, StringComparison.OrdinalIgnoreCase));
-
-                if (string.IsNullOrEmpty(currentHash))
+                var manifestPath = Path.Combine(run.FinalDirectory, "manifest.json");
+                var manifest = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(manifestPath));
+                if (manifest == null ||
+                    manifest.FormatVersion != BackupManifest.CurrentFormatVersion ||
+                    !string.Equals(manifest.PlanFingerprint, run.PlanFingerprint, StringComparison.Ordinal) ||
+                    manifest.Parts.Count != parts.Count)
                 {
-                    return Result.Fail("FileHashComponent missing.");
+                    error = $"Published backup directory is incompatible: '{run.FinalDirectory}'.";
+                    return false;
                 }
 
-                if (plan == null)
+                var manifestParts = manifest.Parts.ToDictionary(part => part.PartNumber);
+                foreach (var item in parts)
                 {
-                    return Result.Fail("Backup manifest entry missing.");
-                }
-
-                lock (_archiveLock)
-                {
-                    if (IsAlreadyCompleted(plan))
+                    var part = item.Part;
+                    if (!manifestParts.TryGetValue(part.PartNumber, out var manifestPart) ||
+                        !string.Equals(manifestPart.Fingerprint, part.Fingerprint, StringComparison.Ordinal))
                     {
-                        _fileHashes[filePathComponent.FilePath] = currentHash;
-                        _bytesWritten += plan.Length;
-                        _filesWrittenOrSkipped++;
-                        LogBackupProgress(force: false);
-                        return Result.Success();
+                        error = $"Published backup part {part.PartNumber} does not match the current plan.";
+                        return false;
                     }
 
-                    WriteFileToArchive(filePathComponent.FilePath, entryName);
-                    _backupRunState.AppendCompletedFile(plan.Index, currentHash);
-                    _completedFiles[plan.Index] = currentHash;
-                    _fileHashes[filePathComponent.FilePath] = currentHash;
-                    _filesWrittenOrSkipped++;
-                    LogBackupProgress(force: false);
+                    var archivePath = Path.Combine(run.FinalDirectory, part.ArchiveFileName);
+                    if (!File.Exists(archivePath) || new FileInfo(archivePath).Length != manifestPart.ArchiveBytes)
+                    {
+                        error = $"Published backup part is missing or incomplete: '{archivePath}'.";
+                        return false;
+                    }
+
+                    item.Status.State = BackupPartState.Transferred;
+                    item.Status.DestinationArchivePath = archivePath;
+                    item.Status.ArchiveBytes = manifestPart.ArchiveBytes;
                 }
 
-                return Result.Success();
+                return true;
             }
             catch (Exception ex)
             {
-                _failureCount++;
-                return Result.Fail($"Failed to store file version: {ex.Message}");
+                error = $"Could not validate published backup '{run.FinalDirectory}': {ex.Message}";
+                return false;
             }
         }
 
-        public Result EndExecution(IEnumerable<Entity> entities, IComponentStorage storage)
+        private void PreparePart(
+            PartEntity item,
+            BackupRunComponent run,
+            BackupProgressTracker progress)
         {
-            if (_plannedFiles.Count == 0)
+            var part = item.Part;
+            var status = item.Status;
+            var checkpoint = _runState.LoadPartCheckpoint(part.PartNumber);
+            if (!CheckpointMatches(checkpoint, part))
             {
-                return Result.Success();
+                InvalidatePart(item);
+                return;
             }
 
-            lock (_archiveLock)
+            status.ArchiveBytes = checkpoint!.ArchiveBytes;
+            if (File.Exists(status.DestinationArchivePath) &&
+                new FileInfo(status.DestinationArchivePath).Length == checkpoint.ArchiveBytes)
             {
-                try
-                {
-                    LogBackupProgress(force: true);
-
-                    if (_failureCount > 0)
-                    {
-                        return Result.Fail($"Backup archive left resumable after {_failureCount} file failure(s).");
-                    }
-
-                    if (_partialArchivePath == null || _finalArchivePath == null || _manifest == null)
-                    {
-                        return Result.Fail("Backup archive was not initialized.");
-                    }
-
-                    CopyStagedArchiveToDestination(_partialArchivePath, _finalArchivePath);
-                    lock (_backupDatesLock)
-                    {
-                        _backupDates.Add(_manifest.BackupDate);
-                    }
-                    _backupRunState.ClearRun();
-                    _logger?.Log($"Backup Execution: finalized archive '{_finalArchivePath}'.");
-
-                    return Result.Success();
-                }
-                catch (Exception ex)
-                {
-                    return Result.Fail($"Failed to finalize backup archive: {ex.Message}");
-                }
+                status.State = BackupPartState.Transferred;
+                File.Delete(status.LocalArchivePath);
+                File.Delete(status.LocalArchivePath + ".partial");
+                progress.ReuseTransferredPart(part);
+                return;
             }
+
+            File.Delete(status.DestinationArchivePath);
+            File.Delete(status.DestinationArchivePath + ".copying");
+            if (File.Exists(status.LocalArchivePath) &&
+                new FileInfo(status.LocalArchivePath).Length == checkpoint.ArchiveBytes)
+            {
+                status.State = BackupPartState.Staged;
+                progress.ReuseStagedPart(part);
+                return;
+            }
+
+            InvalidatePart(item);
         }
 
-        private BackupFilePlan? CreatePlan(Entity entity, IComponentStorage storage)
+        private static bool CheckpointMatches(
+            BackupPartCheckpoint? checkpoint,
+            BackupPartComponent part)
         {
-            var backupDateComponent = storage.GetComponent<BackupDateComponent>(entity);
-            var filePathComponent = storage.GetComponent<FilePathComponent>(entity);
-            var fileHashComponent = storage.GetComponent<FileHashComponent>(entity);
-
-            if (backupDateComponent == null || filePathComponent == null || fileHashComponent == null)
-            {
-                return null;
-            }
-
-            return new BackupFilePlan(
-                -1,
-                filePathComponent.FilePath,
-                NormalizeZipEntryName(Path.GetRelativePath(_sourceDirectory, filePathComponent.FilePath)),
-                fileHashComponent.CurrentHash,
-                backupDateComponent.BackupDate,
-                new FileInfo(filePathComponent.FilePath).Length);
+            return checkpoint != null &&
+                   checkpoint.PartNumber == part.PartNumber &&
+                   checkpoint.FileCount == part.Files.Count &&
+                   checkpoint.SourceBytes == part.SourceBytes &&
+                   checkpoint.ArchiveBytes > 0 &&
+                   string.Equals(checkpoint.ArchiveFileName, part.ArchiveFileName, StringComparison.Ordinal) &&
+                   string.Equals(checkpoint.Fingerprint, part.Fingerprint, StringComparison.Ordinal);
         }
 
-        private static List<BackupFilePlan> AssignManifestIndexes(
-            IReadOnlyCollection<BackupFilePlan> plans,
-            BackupManifest manifest)
+        private void InvalidatePart(PartEntity item)
         {
-            var filesByEntry = manifest.Files.ToDictionary(file => file.EntryName, StringComparer.OrdinalIgnoreCase);
-
-            return plans.Select(plan =>
-            {
-                var manifestFile = filesByEntry[plan.EntryName];
-                return plan with { Index = manifestFile.Index };
-            }).ToList();
+            var part = item.Part;
+            var status = item.Status;
+            _runState.DeletePartCheckpoint(part.PartNumber);
+            File.Delete(status.LocalArchivePath);
+            File.Delete(status.LocalArchivePath + ".partial");
+            File.Delete(status.DestinationArchivePath);
+            File.Delete(status.DestinationArchivePath + ".copying");
+            status.State = BackupPartState.Planned;
+            status.ArchiveBytes = 0;
         }
 
-        private void EnsureUsablePartialArchive()
+        private void CompressPart(
+            PartEntity item,
+            BackupProgressTracker progress)
         {
-            if (_partialArchivePath == null || _manifest == null)
-            {
-                throw new InvalidOperationException("Backup archive was not initialized.");
-            }
+            var part = item.Part;
+            var status = item.Status;
+            var partialPath = status.LocalArchivePath + ".partial";
+            File.Delete(partialPath);
+            File.Delete(status.LocalArchivePath);
 
             try
             {
-                using var archive = ZipFile.Open(_partialArchivePath, ZipArchiveMode.Update);
-                RemoveMissingCheckpointEntries(archive);
+                using (var output = new FileStream(
+                    partialPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    1024 * 1024,
+                    FileOptions.SequentialScan))
+                using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: false))
+                {
+                    var buffer = new byte[1024 * 1024];
+                    foreach (var file in part.Files)
+                    {
+                        var entry = archive.CreateEntry(file.EntryName, GetCompressionLevel(file.SourcePath));
+                        using var input = new FileStream(
+                            file.SourcePath,
+                            FileMode.Open,
+                            FileAccess.Read,
+                            FileShare.Read,
+                            buffer.Length,
+                            FileOptions.SequentialScan);
+                        using var entryStream = entry.Open();
+
+                        int bytesRead;
+                        while ((bytesRead = input.Read(buffer, 0, buffer.Length)) > 0)
+                        {
+                            entryStream.Write(buffer, 0, bytesRead);
+                            progress.AddCompressedBytes(bytesRead);
+                        }
+                    }
+                }
+
+                File.Move(partialPath, status.LocalArchivePath, true);
+                status.ArchiveBytes = new FileInfo(status.LocalArchivePath).Length;
+                _runState.SavePartCheckpoint(new BackupPartCheckpoint
+                {
+                    PartNumber = part.PartNumber,
+                    ArchiveFileName = part.ArchiveFileName,
+                    Fingerprint = part.Fingerprint,
+                    FileCount = part.Files.Count,
+                    SourceBytes = part.SourceBytes,
+                    ArchiveBytes = status.ArchiveBytes
+                });
+                status.State = BackupPartState.Staged;
+                progress.CompleteCompressionPart(part);
             }
-            catch (InvalidDataException)
+            catch
             {
-                File.Delete(_partialArchivePath);
-                _completedFiles.Clear();
-                _backupRunState.ClearCompletedLog();
-                using var archive = ZipFile.Open(_partialArchivePath, ZipArchiveMode.Create);
-            }
-        }
-
-        private void RemoveMissingCheckpointEntries(ZipArchive archive)
-        {
-            if (_manifest == null)
-            {
-                return;
-            }
-
-            var manifestEntriesByIndex = _manifest.Files.ToDictionary(file => file.Index);
-            var missingIndexes = _completedFiles
-                .Where(completed =>
-                    !manifestEntriesByIndex.TryGetValue(completed.Key, out var manifestFile) ||
-                    completed.Value != manifestFile.Hash ||
-                    archive.GetEntry(manifestFile.EntryName) == null)
-                .Select(completed => completed.Key)
-                .ToList();
-
-            foreach (var index in missingIndexes)
-            {
-                _completedFiles.Remove(index);
-            }
-        }
-
-        private bool IsAlreadyCompleted(BackupFilePlan plan)
-        {
-            if (_partialArchivePath == null)
-            {
-                return false;
-            }
-
-            if (!_completedFiles.TryGetValue(plan.Index, out var completedHash) ||
-                completedHash != plan.Hash)
-            {
-                return false;
-            }
-
-            using var archive = ZipFile.OpenRead(_partialArchivePath);
-            return archive.GetEntry(plan.EntryName) != null;
-        }
-
-        private void WriteFileToArchive(string filePath, string entryName)
-        {
-            if (_partialArchivePath == null)
-            {
-                throw new InvalidOperationException("Backup archive was not initialized.");
-            }
-
-            using var archive = ZipFile.Open(_partialArchivePath, ZipArchiveMode.Update);
-            archive.GetEntry(entryName)?.Delete();
-            var entry = archive.CreateEntry(entryName, GetCompressionLevel(filePath));
-
-            using var input = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var output = entry.Open();
-            var buffer = new byte[1024 * 1024];
-            int read;
-            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
-            {
-                output.Write(buffer, 0, read);
-                _bytesWritten += read;
-                LogBackupProgress(force: false);
+                File.Delete(partialPath);
+                throw;
             }
         }
 
-        private void LogBackupProgress(bool force)
+        private async Task TransferPartsAsync(
+            ChannelReader<PartEntity> reader,
+            BackupRunComponent run,
+            BackupProgressTracker progress,
+            SemaphoreSlim localPartSlots,
+            CancellationToken cancellationToken)
         {
-            if (_logger == null || _filesToWriteOrSkip == 0)
+            await foreach (var item in reader.ReadAllAsync(cancellationToken))
             {
-                return;
-            }
-
-            var now = DateTime.UtcNow;
-            if (!force && now - _lastProgressLogUtc < TimeSpan.FromSeconds(1))
-            {
-                return;
-            }
-
-            _lastProgressLogUtc = now;
-            var percent = _totalBytesToWrite == 0
-                ? _filesWrittenOrSkipped * 100.0 / _filesToWriteOrSkip
-                : Math.Min(100, _bytesWritten * 100.0 / _totalBytesToWrite);
-            var eta = CalculateEta(percent);
-
-            ReportProgress(
-                $"Backup Execution: {percent:0.0}% complete, " +
-                $"{_bytesWritten / 1024d / 1024d:0.0}/{_totalBytesToWrite / 1024d / 1024d:0.0} MB, " +
-                $"{_filesWrittenOrSkipped}/{_filesToWriteOrSkip} file(s), ETA: {eta}");
-        }
-
-        private void ReportProgress(string message)
-        {
-            if (_logger is IProgressLogger progressLogger)
-            {
-                progressLogger.ReportProgress(message);
-            }
-        }
-
-        private string CalculateEta(double percent)
-        {
-            if (percent <= 0 || percent >= 100)
-            {
-                return "00:00:00";
-            }
-
-            var remainingTicks = _stopwatch.Elapsed.Ticks * (100 - percent) / percent;
-            return TimeSpan.FromTicks((long)remainingTicks).ToString(@"hh\:mm\:ss");
-        }
-
-        private static string NormalizeZipEntryName(string relativePath)
-        {
-            return relativePath
-                .Replace(Path.DirectorySeparatorChar, '/')
-                .Replace(Path.AltDirectorySeparatorChar, '/');
-        }
-
-        private void CopyStagedArchiveToDestination(string stagedArchivePath, string finalArchivePath)
-        {
-            var copyingPath = finalArchivePath + ".copying";
-            if (File.Exists(copyingPath))
-            {
+                var part = item.Part;
+                var status = item.Status;
+                var copyingPath = status.DestinationArchivePath + ".copying";
                 File.Delete(copyingPath);
+                EnsureDestinationCapacity(run.BackupDestination, status.ArchiveBytes);
+
+                try
+                {
+                    await using (var input = new FileStream(
+                        status.LocalArchivePath,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.Read,
+                        _options.CopyBufferSize,
+                        FileOptions.Asynchronous | FileOptions.SequentialScan))
+                    await using (var output = new FileStream(
+                        copyingPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        _options.CopyBufferSize,
+                        FileOptions.Asynchronous | FileOptions.SequentialScan))
+                    {
+                        var buffer = new byte[_options.CopyBufferSize];
+                        long copiedBytes = 0;
+                        int bytesRead;
+                        while ((bytesRead = await input.ReadAsync(buffer, cancellationToken)) > 0)
+                        {
+                            await output.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
+                            copiedBytes += bytesRead;
+                            progress.SetPartTransferProgress(part, copiedBytes, status.ArchiveBytes);
+                        }
+
+                        await output.FlushAsync(cancellationToken);
+                        output.Flush(flushToDisk: true);
+                    }
+
+                    if (new FileInfo(copyingPath).Length != status.ArchiveBytes)
+                    {
+                        throw new IOException($"Transferred part length does not match for '{part.ArchiveFileName}'.");
+                    }
+
+                    File.Move(copyingPath, status.DestinationArchivePath, true);
+                    status.State = BackupPartState.Transferred;
+                    File.Delete(status.LocalArchivePath);
+                    progress.CompleteTransferPart(part);
+                    _logger?.Log(
+                        $"Backup Execution: transferred part {part.PartNumber}/{run.TotalParts} " +
+                        $"to '{run.WorkingDirectory}'.");
+                }
+                catch
+                {
+                    File.Delete(copyingPath);
+                    throw;
+                }
+                finally
+                {
+                    localPartSlots.Release();
+                }
             }
+        }
 
-            _logger?.Log($"Backup Execution: copying staged archive to '{finalArchivePath}'.");
-            File.Copy(stagedArchivePath, copyingPath);
-
-            if (File.Exists(finalArchivePath))
+        private void EnsureLocalStagingCapacity(
+            BackupRunComponent run,
+            IReadOnlyList<PartEntity> parts)
+        {
+            var plannedParts = parts
+                .Where(item => item.Status.State == BackupPartState.Planned)
+                .ToList();
+            if (plannedParts.Count == 0)
             {
-                File.Delete(finalArchivePath);
+                return;
             }
 
-            File.Move(copyingPath, finalArchivePath);
+            var largestPart = plannedParts.Max(item => item.Part.SourceBytes);
+            var boundedPartCount = Math.Min(plannedParts.Count, _options.TransferQueueCapacity + 1);
+            var requiredBytes = checked(largestPart * boundedPartCount);
+            EnsureDriveCapacity(run.StagingDirectory, requiredBytes, "local staging");
+        }
+
+        private static void EnsureDestinationCapacity(string destination, long requiredBytes)
+        {
+            EnsureDriveCapacity(destination, requiredBytes, "backup destination");
+        }
+
+        private static void EnsureDriveCapacity(string path, long requiredBytes, string label)
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(path));
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return;
+            }
+
+            var drive = new DriveInfo(root);
+            if (drive.IsReady && drive.AvailableFreeSpace < requiredBytes)
+            {
+                throw new IOException(
+                    $"Not enough free space in {label}. " +
+                    $"Required: {requiredBytes / 1024d / 1024d:0.0} MB; " +
+                    $"available: {drive.AvailableFreeSpace / 1024d / 1024d:0.0} MB.");
+            }
         }
 
         private static CompressionLevel GetCompressionLevel(string filePath)
         {
-            var extension = Path.GetExtension(filePath).ToLowerInvariant();
-            return PreCompressedExtensions.Contains(extension)
+            return PreCompressedExtensions.Contains(Path.GetExtension(filePath))
                 ? CompressionLevel.NoCompression
                 : CompressionLevel.Optimal;
         }
@@ -424,6 +521,179 @@ namespace DifferentialBackup.Systems
             ".zip"
         };
 
-        private sealed record BackupFilePlan(int Index, string FilePath, string EntryName, string Hash, DateTime BackupDate, long Length);
+        private sealed record PartEntity(
+            BackupPartComponent Part,
+            BackupPartStatusComponent Status);
+
+        private sealed class BackupProgressTracker
+        {
+            private readonly object _lock = new();
+            private readonly long _totalSourceBytes;
+            private readonly int _totalParts;
+            private readonly IPipelineLogger? _logger;
+            private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
+            private long _compressedBytes;
+            private long _transferredSourceBytes;
+            private long _compressedSessionBytes;
+            private long _transferredSessionBytes;
+            private long _currentTransferSourceBytes;
+            private int _compressedParts;
+            private int _transferredParts;
+            private long _lastReportTimestamp;
+
+            public BackupProgressTracker(long totalSourceBytes, int totalParts, IPipelineLogger? logger)
+            {
+                _totalSourceBytes = totalSourceBytes;
+                _totalParts = totalParts;
+                _logger = logger;
+            }
+
+            public void ReuseTransferredPart(BackupPartComponent part)
+            {
+                lock (_lock)
+                {
+                    _compressedBytes += part.SourceBytes;
+                    _transferredSourceBytes += part.SourceBytes;
+                    _compressedParts++;
+                    _transferredParts++;
+                }
+            }
+
+            public void ReuseStagedPart(BackupPartComponent part)
+            {
+                lock (_lock)
+                {
+                    _compressedBytes += part.SourceBytes;
+                    _compressedParts++;
+                }
+            }
+
+            public void AddCompressedBytes(int bytes)
+            {
+                lock (_lock)
+                {
+                    _compressedBytes += bytes;
+                    _compressedSessionBytes += bytes;
+                    ReportLocked(force: false);
+                }
+            }
+
+            public void CompleteCompressionPart(BackupPartComponent part)
+            {
+                lock (_lock)
+                {
+                    _compressedParts++;
+                    ReportLocked(force: false);
+                }
+            }
+
+            public void SetPartTransferProgress(
+                BackupPartComponent part,
+                long copiedArchiveBytes,
+                long totalArchiveBytes)
+            {
+                lock (_lock)
+                {
+                    var previous = _currentTransferSourceBytes;
+                    _currentTransferSourceBytes = totalArchiveBytes == 0
+                        ? part.SourceBytes
+                        : (long)(part.SourceBytes * (copiedArchiveBytes / (double)totalArchiveBytes));
+                    _transferredSessionBytes += Math.Max(0, _currentTransferSourceBytes - previous);
+                    ReportLocked(force: false);
+                }
+            }
+
+            public void CompleteTransferPart(BackupPartComponent part)
+            {
+                lock (_lock)
+                {
+                    _transferredSourceBytes += part.SourceBytes;
+                    _currentTransferSourceBytes = 0;
+                    _transferredParts++;
+                    ReportLocked(force: false);
+                }
+            }
+
+            public void Report(bool force)
+            {
+                lock (_lock)
+                {
+                    ReportLocked(force);
+                }
+            }
+
+            private void ReportLocked(bool force)
+            {
+                if (_logger is not IProgressLogger progressLogger)
+                {
+                    return;
+                }
+
+                var now = Stopwatch.GetTimestamp();
+                if (!force &&
+                    _lastReportTimestamp != 0 &&
+                    Stopwatch.GetElapsedTime(_lastReportTimestamp, now) < TimeSpan.FromSeconds(1))
+                {
+                    return;
+                }
+
+                _lastReportTimestamp = now;
+                var compressionPercent = Percent(_compressedBytes, _compressedParts);
+                var transferBytes = _transferredSourceBytes + _currentTransferSourceBytes;
+                var transferPercent = Percent(transferBytes, _transferredParts);
+                var eta = CalculateEta(
+                    _totalSourceBytes - Math.Min(_totalSourceBytes, _compressedBytes),
+                    _compressedSessionBytes,
+                    _totalSourceBytes - Math.Min(_totalSourceBytes, transferBytes),
+                    _transferredSessionBytes);
+
+                progressLogger.ReportProgress(
+                    $"Backup parts: compress {compressionPercent:0.0}% ({_compressedParts}/{_totalParts}), " +
+                    $"transfer {transferPercent:0.0}% ({_transferredParts}/{_totalParts}), ETA: {eta}");
+            }
+
+            private double Percent(long bytes, int parts)
+            {
+                return _totalSourceBytes > 0
+                    ? Math.Min(100, bytes * 100d / _totalSourceBytes)
+                    : Math.Min(100, parts * 100d / _totalParts);
+            }
+
+            private string CalculateEta(
+                long remainingCompressionBytes,
+                long compressedSessionBytes,
+                long remainingTransferBytes,
+                long transferredSessionBytes)
+            {
+                var compressionEta = Estimate(remainingCompressionBytes, compressedSessionBytes);
+                var transferEta = Estimate(remainingTransferBytes, transferredSessionBytes);
+                var eta = compressionEta > transferEta ? compressionEta : transferEta;
+                return eta == TimeSpan.MaxValue ? "--:--:--" : FormatDuration(eta);
+            }
+
+            private TimeSpan Estimate(long remainingBytes, long completedSessionBytes)
+            {
+                if (remainingBytes <= 0)
+                {
+                    return TimeSpan.Zero;
+                }
+
+                if (completedSessionBytes <= 0 || _stopwatch.Elapsed <= TimeSpan.Zero)
+                {
+                    return TimeSpan.MaxValue;
+                }
+
+                var seconds = remainingBytes * _stopwatch.Elapsed.TotalSeconds / completedSessionBytes;
+                return seconds >= TimeSpan.MaxValue.TotalSeconds
+                    ? TimeSpan.MaxValue
+                    : TimeSpan.FromSeconds(seconds);
+            }
+
+            private static string FormatDuration(TimeSpan duration)
+            {
+                var totalHours = (long)duration.TotalHours;
+                return $"{totalHours:00}:{duration.Minutes:00}:{duration.Seconds:00}";
+            }
+        }
     }
 }

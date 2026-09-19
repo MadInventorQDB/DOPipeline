@@ -1,45 +1,58 @@
-using System;
-using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace DifferentialBackup.Utilities
 {
-    public class BackupRunState
+    public sealed class BackupRunState
     {
         private readonly object _lock = new();
         private readonly string _sourceDirectory;
         private readonly string _backupDestination;
+        private readonly string _stagingRoot;
         private readonly string _stagingDirectory;
 
         public BackupRunState(string sourceDirectory, string backupDestination, string? stagingRoot = null)
         {
-            _sourceDirectory = Path.GetFullPath(sourceDirectory);
-            _backupDestination = Path.GetFullPath(backupDestination);
+            _sourceDirectory = NormalizeDirectory(sourceDirectory);
+            _backupDestination = NormalizeDirectory(backupDestination);
+            _stagingRoot = NormalizeDirectory(stagingRoot ?? GetDefaultStagingRoot());
             _stagingDirectory = Path.Combine(
-                stagingRoot ?? GetDefaultStagingRoot(),
+                _stagingRoot,
                 CreateStableDirectoryName(_sourceDirectory, _backupDestination));
         }
 
-        public BackupManifest? Manifest { get; private set; }
+        public BackupJobState? Job { get; private set; }
 
         public DateTime? BackupDate { get; private set; }
 
         public string StagingDirectory => _stagingDirectory;
 
-        public string ManifestPath => Path.Combine(_stagingDirectory, "manifest.json");
+        public string JobPath => Path.Combine(_stagingDirectory, "job.json");
 
-        public string CompletedLogPath => Path.Combine(_stagingDirectory, "completed.log");
+        public string FinalManifestStagingPath => Path.Combine(_stagingDirectory, "manifest.json");
 
         public void BeginRun()
         {
             lock (_lock)
             {
-                Manifest = LoadManifest();
-                BackupDate = Manifest?.BackupDate;
+                Job = null;
+                BackupDate = null;
+
+                if (!Directory.Exists(_stagingDirectory))
+                {
+                    return;
+                }
+
+                Job = LoadJob();
+                if (Job == null)
+                {
+                    throw new InvalidDataException(
+                        $"Staging directory does not contain a compatible backup job: '{_stagingDirectory}'. " +
+                        "Remove or relocate it before retrying.");
+                }
+
+                BackupDate = Job.BackupDate;
             }
         }
 
@@ -47,114 +60,141 @@ namespace DifferentialBackup.Utilities
         {
             lock (_lock)
             {
-                BackupDate ??= preferredBackupDate.HasValue
-                    ? TruncateToSecond(preferredBackupDate.Value)
-                    : TruncateToSecond(DateTime.UtcNow);
+                BackupDate ??= TruncateToSecond(preferredBackupDate ?? DateTime.UtcNow);
                 return BackupDate.Value;
             }
         }
 
-        public BackupManifest CreateOrUpdateManifest(DateTime backupDate, IReadOnlyCollection<BackupManifestFile> files)
+        public BackupJobState CreateOrUpdateJob(
+            DateTime backupDate,
+            BackupBatchOptions options,
+            string planFingerprint,
+            int totalParts,
+            int totalFiles,
+            long sourceBytes)
         {
             lock (_lock)
             {
                 Directory.CreateDirectory(_stagingDirectory);
+                var preservePublishedState = Job is { Published: true } &&
+                    string.Equals(Job.PlanFingerprint, planFingerprint, StringComparison.Ordinal);
 
-                Manifest ??= new BackupManifest
+                Job ??= new BackupJobState
                 {
                     SourceDirectory = _sourceDirectory,
                     BackupDestination = _backupDestination,
-                    BackupDate = backupDate,
-                    PartialArchiveName = backupDate.ToString("yyyyMMddHHmmss") + ".zip.partial",
-                    StagingArchivePath = Path.Combine(_stagingDirectory, backupDate.ToString("yyyyMMddHHmmss") + ".zip.partial")
+                    BackupDate = TruncateToSecond(backupDate)
                 };
 
-                MergeManifestFiles(Manifest, files);
-                SaveManifest();
+                Job.MaxSourceBytesPerPart = options.MaxSourceBytesPerPart;
+                Job.MaxFilesPerPart = options.MaxFilesPerPart;
+                Job.PlanFingerprint = planFingerprint;
+                Job.TotalParts = totalParts;
+                Job.TotalFiles = totalFiles;
+                Job.SourceBytes = sourceBytes;
+                Job.Published = preservePublishedState;
+                BackupDate = Job.BackupDate;
+                SaveJsonAtomic(JobPath, Job);
 
-                return Manifest;
+                return Job;
             }
         }
 
-        public Dictionary<int, string> LoadCompletedFiles()
+        public BackupPartCheckpoint? LoadPartCheckpoint(int partNumber)
         {
             lock (_lock)
             {
-                var completed = new Dictionary<int, string>();
-                if (!File.Exists(CompletedLogPath))
+                var path = GetPartCheckpointPath(partNumber);
+                try
                 {
-                    return completed;
-                }
-
-                foreach (var line in File.ReadLines(CompletedLogPath))
-                {
-                    var parts = line.Split('\t');
-                    if (parts.Length >= 2 && int.TryParse(parts[0], out var index))
+                    if (!File.Exists(path))
                     {
-                        completed[index] = parts[1];
+                        return null;
                     }
-                }
 
-                return completed;
+                    var checkpoint = JsonSerializer.Deserialize<BackupPartCheckpoint>(File.ReadAllText(path));
+                    return checkpoint is { FormatVersion: BackupJobState.CurrentFormatVersion } &&
+                           checkpoint.PartNumber == partNumber
+                        ? checkpoint
+                        : null;
+                }
+                catch
+                {
+                    return null;
+                }
             }
         }
 
-        public void AppendCompletedFile(int index, string hash)
+        public void SavePartCheckpoint(BackupPartCheckpoint checkpoint)
         {
             lock (_lock)
             {
                 Directory.CreateDirectory(_stagingDirectory);
-                File.AppendAllText(CompletedLogPath, $"{index}\t{hash}{Environment.NewLine}");
+                SaveJsonAtomic(GetPartCheckpointPath(checkpoint.PartNumber), checkpoint);
             }
         }
 
-        public void ClearCompletedLog()
+        public void DeletePartCheckpoint(int partNumber)
         {
             lock (_lock)
             {
-                if (File.Exists(CompletedLogPath))
+                File.Delete(GetPartCheckpointPath(partNumber));
+            }
+        }
+
+        public void MarkPublished()
+        {
+            lock (_lock)
+            {
+                if (Job == null)
                 {
-                    File.Delete(CompletedLogPath);
+                    throw new InvalidOperationException("Backup job was not initialized.");
                 }
+
+                Job.Published = true;
+                SaveJsonAtomic(JobPath, Job);
+            }
+        }
+
+        public void ResetRun()
+        {
+            lock (_lock)
+            {
+                Job = null;
+                BackupDate = null;
+                DeleteStagingDirectory();
             }
         }
 
         public void ClearRun()
         {
-            lock (_lock)
-            {
-                Manifest = null;
-                if (Directory.Exists(_stagingDirectory))
-                {
-                    Directory.Delete(_stagingDirectory, true);
-                }
-            }
+            ResetRun();
         }
 
-        private BackupManifest? LoadManifest()
+        public string GetPartCheckpointPath(int partNumber)
+        {
+            return Path.Combine(_stagingDirectory, $"part-{partNumber:000000}.index.json");
+        }
+
+        private BackupJobState? LoadJob()
         {
             try
             {
-                if (!File.Exists(ManifestPath))
+                if (!File.Exists(JobPath))
                 {
                     return null;
                 }
 
-                var json = File.ReadAllText(ManifestPath);
-                var manifest = JsonSerializer.Deserialize<BackupManifest>(json);
-                if (manifest == null ||
-                    !PathsEqual(manifest.SourceDirectory, _sourceDirectory) ||
-                    !PathsEqual(manifest.BackupDestination, _backupDestination))
+                var job = JsonSerializer.Deserialize<BackupJobState>(File.ReadAllText(JobPath));
+                if (job == null ||
+                    job.FormatVersion != BackupJobState.CurrentFormatVersion ||
+                    !PathsEqual(job.SourceDirectory, _sourceDirectory) ||
+                    !PathsEqual(job.BackupDestination, _backupDestination))
                 {
                     return null;
                 }
 
-                if (string.IsNullOrWhiteSpace(manifest.StagingArchivePath))
-                {
-                    manifest.StagingArchivePath = Path.Combine(_stagingDirectory, manifest.PartialArchiveName);
-                }
-
-                return manifest;
+                return job;
             }
             catch
             {
@@ -162,36 +202,27 @@ namespace DifferentialBackup.Utilities
             }
         }
 
-        private void SaveManifest()
+        private void DeleteStagingDirectory()
         {
-            if (Manifest == null)
+            if (!Directory.Exists(_stagingDirectory))
             {
                 return;
             }
 
-            var json = JsonSerializer.Serialize(Manifest);
-            File.WriteAllText(ManifestPath, json);
+            var parent = Path.GetDirectoryName(_stagingDirectory);
+            if (!PathsEqual(parent ?? string.Empty, _stagingRoot))
+            {
+                throw new InvalidOperationException("Refusing to remove a staging directory outside the staging root.");
+            }
+
+            Directory.Delete(_stagingDirectory, true);
         }
 
-        private static void MergeManifestFiles(BackupManifest manifest, IReadOnlyCollection<BackupManifestFile> files)
+        private static void SaveJsonAtomic<T>(string path, T value)
         {
-            var byEntry = manifest.Files.ToDictionary(file => file.EntryName, StringComparer.OrdinalIgnoreCase);
-            var nextIndex = manifest.Files.Count == 0 ? 0 : manifest.Files.Max(file => file.Index) + 1;
-
-            foreach (var file in files)
-            {
-                if (byEntry.TryGetValue(file.EntryName, out var existing))
-                {
-                    existing.SourcePath = file.SourcePath;
-                    existing.Hash = file.Hash;
-                    existing.Length = file.Length;
-                    continue;
-                }
-
-                file.Index = nextIndex++;
-                manifest.Files.Add(file);
-                byEntry[file.EntryName] = file;
-            }
+            var temporaryPath = path + ".tmp";
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(value));
+            File.Move(temporaryPath, path, true);
         }
 
         private static DateTime TruncateToSecond(DateTime value)
@@ -199,12 +230,23 @@ namespace DifferentialBackup.Utilities
             return new DateTime(value.Ticks - value.Ticks % TimeSpan.TicksPerSecond, value.Kind);
         }
 
+        private static string NormalizeDirectory(string path)
+        {
+            var fullPath = Path.GetFullPath(path);
+            var root = Path.GetPathRoot(fullPath);
+            return string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase)
+                ? fullPath
+                : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
         private static bool PathsEqual(string left, string right)
         {
-            return string.Equals(
-                Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
-                StringComparison.OrdinalIgnoreCase);
+            if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+            {
+                return false;
+            }
+
+            return string.Equals(NormalizeDirectory(left), NormalizeDirectory(right), StringComparison.OrdinalIgnoreCase);
         }
 
         private static string GetDefaultStagingRoot()
@@ -216,8 +258,51 @@ namespace DifferentialBackup.Utilities
         private static string CreateStableDirectoryName(string sourceDirectory, string backupDestination)
         {
             var key = $"{sourceDirectory}|{backupDestination}";
-            var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).Substring(0, 16);
-            return hash;
+            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))).Substring(0, 16);
         }
+    }
+
+    public sealed class BackupJobState
+    {
+        public const int CurrentFormatVersion = 2;
+
+        public int FormatVersion { get; set; } = CurrentFormatVersion;
+
+        public string SourceDirectory { get; set; } = string.Empty;
+
+        public string BackupDestination { get; set; } = string.Empty;
+
+        public DateTime BackupDate { get; set; }
+
+        public long MaxSourceBytesPerPart { get; set; }
+
+        public int MaxFilesPerPart { get; set; }
+
+        public string PlanFingerprint { get; set; } = string.Empty;
+
+        public int TotalParts { get; set; }
+
+        public int TotalFiles { get; set; }
+
+        public long SourceBytes { get; set; }
+
+        public bool Published { get; set; }
+    }
+
+    public sealed class BackupPartCheckpoint
+    {
+        public int FormatVersion { get; set; } = BackupJobState.CurrentFormatVersion;
+
+        public int PartNumber { get; set; }
+
+        public string ArchiveFileName { get; set; } = string.Empty;
+
+        public string Fingerprint { get; set; } = string.Empty;
+
+        public int FileCount { get; set; }
+
+        public long SourceBytes { get; set; }
+
+        public long ArchiveBytes { get; set; }
     }
 }

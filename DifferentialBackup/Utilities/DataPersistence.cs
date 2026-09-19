@@ -21,7 +21,7 @@ namespace DifferentialBackup.Utilities
         public static void SaveFileHashes(ConcurrentDictionary<string, string> fileHashes, string filePath)
         {
             var json = JsonSerializer.Serialize(fileHashes);
-            File.WriteAllText(filePath, json);
+            WriteAllTextAtomic(filePath, json);
         }
 
         public static HashSet<DateTime> LoadBackupDates(string filePath)
@@ -37,7 +37,14 @@ namespace DifferentialBackup.Utilities
         public static void SaveBackupDates(HashSet<DateTime> backupDates, string filePath)
         {
             var json = JsonSerializer.Serialize(backupDates);
-            File.WriteAllText(filePath, json);
+            WriteAllTextAtomic(filePath, json);
+        }
+
+        private static void WriteAllTextAtomic(string filePath, string contents)
+        {
+            var temporaryPath = filePath + ".tmp";
+            File.WriteAllText(temporaryPath, contents);
+            File.Move(temporaryPath, filePath, true);
         }
     }
 }

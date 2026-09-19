@@ -29,10 +29,21 @@ namespace DOPipeline.Pipeline
 
         public Result Execute(IEnumerable<Entity> entities, IComponentStorage storage, IPipelineLogger? logger = null)
         {
-            var entityList = entities as IList<Entity> ?? entities.ToList();
+            var entityList = entities as IReadOnlyList<Entity> ?? entities.ToList();
 
             foreach (var system in _systems)
             {
+                if (system is IEntitySetSystem entitySetSystem)
+                {
+                    var setResult = entitySetSystem.Execute(entityList, storage);
+                    if (!setResult.IsSuccess)
+                    {
+                        return setResult;
+                    }
+
+                    continue;
+                }
+
                 if (system is IExecutionScopedSystem executionScopedSystem)
                 {
                     var beginResult = executionScopedSystem.BeginExecution(entityList, storage);

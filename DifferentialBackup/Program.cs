@@ -171,6 +171,8 @@ namespace DifferentialBackup
             _pipelineLogger.Log($"Loading backup dates from '{backupDatesFilePath}'.");
             var backupDates = DataPersistence.LoadBackupDates(backupDatesFilePath);
             _pipelineLogger.Log($"Loaded {fileHashes.Count} file hashes and {backupDates.Count} backup dates.");
+            var backupDateCountBeforeRun = backupDates.Count;
+            var backupRunState = new BackupRunState(sourceDirectory, backupDestination);
 
             // The initial entity acts as a starting point for the FileDiscoverySystem
             var initialEntity = new Entity();
@@ -183,7 +185,8 @@ namespace DifferentialBackup
                 backupDestination,
                 fileHashes,
                 backupDates,
-                _pipelineLogger); // <-- Pass logger
+                _pipelineLogger,
+                backupRunState);
 
             _pipelineLogger.Log("Executing Backup pipeline...");
             // Execute the pipeline
@@ -193,14 +196,12 @@ namespace DifferentialBackup
             {
                 _pipelineLogger.Log($"[ERROR] Backup did not complete: {backupResult.ErrorMessage}");
                 Console.WriteLine($"Backup did not complete: {backupResult.ErrorMessage}");
-                Console.WriteLine("A partial archive/checkpoint may remain and will be used by the next backup run.");
+                Console.WriteLine("Completed parts and local checkpoints will be reused by the next backup run.");
                 return;
             }
 
-            // Backup pipeline itself usually returns Success unless there's a fundamental flaw.
-            // Individual file backup errors are handled within the BackupExecutionSystem and logged by the pipeline runner.
-            // We check the backupDates set to see if any new backup actually occurred.
-            bool newBackupOccurred = backupDates.Any(d => (DateTime.UtcNow - d).TotalMinutes < 1); // Check if a recent date was added
+            // Publication adds a date only after every part and the manifest are durable.
+            bool newBackupOccurred = backupDates.Count > backupDateCountBeforeRun;
 
             if (newBackupOccurred)
             {
@@ -216,8 +217,9 @@ namespace DifferentialBackup
 
             _pipelineLogger.Log("Saving potentially updated persisted data...");
             // Save potentially updated persisted data
-            DataPersistence.SaveFileHashes(fileHashes, hashesFilePath);
             DataPersistence.SaveBackupDates(backupDates, backupDatesFilePath);
+            DataPersistence.SaveFileHashes(fileHashes, hashesFilePath);
+            backupRunState.ClearRun();
             _pipelineLogger.Log("Backup operation complete.");
         }
 
@@ -601,7 +603,7 @@ namespace DifferentialBackup
             Console.WriteLine();
             Console.WriteLine("Operations:");
             Console.WriteLine("  backup   Performs a backup. Only files changed since the last backup");
-            Console.WriteLine("           are copied to a new timestamped folder in the destination.");
+            Console.WriteLine("           are stored as numbered ZIP parts in a timestamped backup folder.");
             Console.WriteLine("           Arguments (Optional - will prompt if missing):");
             Console.WriteLine("             <SourceDirectory>    Path to the directory to back up.");
             Console.WriteLine("             <BackupDestination>  Path to the directory where backup folders will be stored.");

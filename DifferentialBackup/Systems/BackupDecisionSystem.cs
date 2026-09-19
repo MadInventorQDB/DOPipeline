@@ -30,13 +30,20 @@ namespace DifferentialBackup.Systems
 
         public Result BeginExecution(IEnumerable<Entity> entities, IComponentStorage storage)
         {
-            lock (_backupDateLock)
+            try
             {
-                _backupRunState?.BeginRun();
-                _currentBackupDate = null;
-            }
+                lock (_backupDateLock)
+                {
+                    _backupRunState?.BeginRun();
+                    _currentBackupDate = null;
+                }
 
-            return Result.Success();
+                return Result.Success();
+            }
+            catch (Exception ex)
+            {
+                return Result.Fail($"Failed to initialize backup run state: {ex.Message}");
+            }
         }
 
         public Result EndExecution(IEnumerable<Entity> entities, IComponentStorage storage)
@@ -59,7 +66,7 @@ namespace DifferentialBackup.Systems
                 storage.SetComponent(entity, new BackupDateComponent { BackupDate = backupDate });
 
                 // Update the hash in the fileHashes
-                // Hashes are updated after a file is successfully written to the backup archive.
+                // Hashes are updated only after the complete backup set is published.
             }
 
             return Result.Success();
