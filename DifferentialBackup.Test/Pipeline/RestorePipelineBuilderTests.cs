@@ -127,10 +127,11 @@ namespace DifferentialBackup.Test.Pipeline
             var result = pipeline.Execute(entities, storage);
 
             // Assert
-            Assert.True(result.IsSuccess);
+            Assert.False(result.IsSuccess);
             var errorComponent = storage.GetComponent<ErrorComponent>(initialEntity);
             Assert.NotNull(errorComponent);
             Assert.Equal("Backup date not found.", errorComponent.ErrorMessage);
+            Assert.True(errorComponent.IsFatal);
             Assert.Empty(Directory.GetFiles(_restoreDestination, "*", SearchOption.AllDirectories));
             Assert.Empty(Directory.GetDirectories(_restoreDestination));
         }

@@ -45,6 +45,10 @@
 - **Duplicate Detection:** Identify groups of duplicate files within a directory and log them.
 - **Interactive Prompts:** User-friendly prompts for required inputs when command-line arguments are not provided.
 - **Data Persistence:** Maintains file hashes and backup dates for efficient backup operations.
+- **Resumable source handling:** Every source path is attempted independently. Locked or changing paths are retained as deferred component rows and retried after 1, 1, 2, 3, 5, 8, and 13 minutes.
+- **Source coverage:** Ordinary folders such as `.vs`, `bin`, and `obj` are included; no automatic cache exclusions are applied. Reparse points are reported as explicit unsupported omissions.
+- **Incomplete results:** Captured content is published with an incomplete manifest when source omissions remain. No empty backup set is published when every eligible source path fails.
+- **Checkpointed restore:** Restore entries are verified before they are skipped, and successful entries are recorded in a restore journal so later invocations retry only unresolved targets.
 
 ## Architecture
 
@@ -112,7 +116,7 @@ var pipeline = pipelineBuilder.Build();
 
 ### Prerequisites
 
-- [.NET 6.0 SDK](https://dotnet.microsoft.com/download/dotnet/6.0) or later installed on your machine.
+- [.NET 10.0 SDK/runtime](https://dotnet.microsoft.com/download/dotnet/10.0) installed on your machine.
 
 ### Clone the Repository
 
@@ -147,6 +151,12 @@ Perform a backup by specifying the source directory and backup destination. Chan
 DifferentialBackup.exe backup <SourceDirectory> <BackupDestination>
 ```
 
+In PowerShell, use the call operator when the executable path contains spaces:
+
+```powershell
+& "D:\DifferentialBackup Program\DifferentialBackup.exe" backup "C:\Users\John Bruce\Videos" "D:\DifferentialBackup"
+```
+
 ##### Example
 
 ```bash
@@ -162,7 +172,7 @@ Restore files from a specific backup date by selecting the matching ZIP archive.
 ##### Command
 
 ```bash
-DifferentialBackup.exe restore <BackupDestination> <RestoreDestination>
+DifferentialBackup.exe restore <BackupDestination> <RestoreDestination> [--backup-date yyyyMMddHHmmss]
 ```
 
 ##### Example
@@ -172,6 +182,14 @@ DifferentialBackup.exe restore "D:\Backups\SourceBackup" "C:\Users\johna\Documen
 ```
 
 The utility will automatically select the latest backup date unless specified otherwise.
+
+Restore accepts version 3 manifests, published version 2 sets, and legacy single-ZIP backups. A selected incomplete set remains a warning even when every archived entry restores.
+
+Backup and restore exit codes are `0` for success, `1` for warnings or incomplete content, `2` for invalid requests, integrity/output/state failures, or a run with no usable captured content, and `130` for user cancellation. The application writes a JSON operation report next to the selected backup or restore destination.
+
+The backup world keeps stable normalized paths and part numbers in components. A retry round is activated by a system-written wait instruction; the host only waits until its due time and runs the same world again. Completed captures and verified restore targets remain available for recovery and are not repeated.
+
+Source paths that cannot be read are retried in shared rounds after 1, 1, 2, 3, 5, 8, and 13 minutes. A backup can publish usable files with an incomplete manifest and exit code `1`; a run with no usable captured content fails with exit code `2`. Publication and hash/date state commits are resumed from durable receipts after interruption, and acknowledged part numbers are never reused when an earlier part is omitted.
 
 #### Query
 

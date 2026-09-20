@@ -30,7 +30,10 @@ namespace DifferentialBackup.Pipeline
             HashSet<DateTime> backupDates,
             IPipelineLogger logger,
             BackupRunState? backupRunState = null,
-            BackupBatchOptions? batchOptions = null)
+            BackupBatchOptions? batchOptions = null,
+            string? hashesPath = null,
+            string? backupDatesPath = null,
+            IClock? clock = null)
         {
             var pipelineBuilder = new PipelineBuilder();
             backupRunState ??= new BackupRunState(sourceDirectory, backupDestination);
@@ -41,6 +44,13 @@ namespace DifferentialBackup.Pipeline
             // Pipe 1: Discover all files in the source directory
             pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder
                 .Named("File Discovery")
+                .AddSystem(new BackupRecoverySystem(
+                    fileHashes,
+                    backupDates,
+                    backupRunState,
+                    hashesPath,
+                    backupDatesPath))
+                .AddSystem(new RetryActivationSystem(backupRunState, clock))
                 .AddSystem(new FileDiscoverySystem(sourceDirectory)));
 
             // Pipe 2: Calculate the current hash for each discovered file
@@ -71,7 +81,15 @@ namespace DifferentialBackup.Pipeline
             // Pipe 6: Publish the manifest and atomically expose the completed backup set
             pipelineBuilder.AddPipe(pipeBuilder => pipeBuilder
                 .Named("Backup Publication")
-                .AddSystem(new BackupPublicationSystem(fileHashes, backupDates, backupRunState, logger)));
+                .AddSystem(new PassCompletionSystem(clock, backupRunState))
+                .AddSystem(new BackupPublicationSystem(fileHashes, backupDates, backupRunState, logger))
+                .AddSystem(new BackupStateCommitSystem(
+                    fileHashes,
+                    backupDates,
+                    backupRunState,
+                    hashesPath,
+                    backupDatesPath))
+                .AddSystem(new OperationSummarySystem()));
 
             return pipelineBuilder.Build();
         }

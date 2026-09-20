@@ -89,14 +89,13 @@ namespace DOPipeline.Test.Pipeline
             var result = pipeline.Execute(new[] { entity }, storage);
 
             // Assert
-            // The pipeline itself should report success because the failure was handled at the system level (ErrorComponent added).
-            Assert.True(result.IsSuccess);
-            // Verify the FailingSystem added an ErrorComponent in Pipe1
+            // A failed Result is a fatal stage boundary and stops later pipes.
+            Assert.False(result.IsSuccess);
+            // Verify the FailingSystem added a fatal ErrorComponent in Pipe1.
             var errorComponent = storage.GetComponent<DOPipeline.Components.ErrorComponent>(entity);
             Assert.NotNull(errorComponent);
             Assert.Equal("System failed intentionally.", errorComponent.ErrorMessage);
-            // We can't easily assert Pipe2 ran without more complex mocking or state changes in ExampleSystem.
-            // But the key is the pipeline *didn't* return Fail.
+            // The second pipe is not reached after the fatal stage result.
         }
     }
 }

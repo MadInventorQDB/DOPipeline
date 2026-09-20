@@ -7,6 +7,7 @@ using DOPipeline.Test.Systems;
 using DOPipeline.Test.Components;
 using System.Collections.Generic;
 using DOPipeline.Components;
+using DOPipeline.Logging;
 using DOPipeline.Utilities;
 
 namespace DOPipeline.Test.Pipeline
@@ -66,11 +67,11 @@ namespace DOPipeline.Test.Pipeline
             var result = pipe.Execute(new[] { entity }, storage);
 
             // Assert
-            Assert.True(result.IsSuccess);
+            Assert.False(result.IsSuccess);
             var errorComponent = storage.GetComponent<ErrorComponent>(entity);
             Assert.NotNull(errorComponent);
-            // *** Corrected Assertion ***
             Assert.Equal("Component missing.", errorComponent.ErrorMessage);
+            Assert.True(errorComponent.IsFatal);
         }
 
         [Fact]
@@ -95,18 +96,20 @@ namespace DOPipeline.Test.Pipeline
             var result = pipe.Execute(entities, storage);
 
             // Assert
-            Assert.True(result.IsSuccess);
+            Assert.False(result.IsSuccess);
 
             // Check entity1: Error from FailingSystem persists
             var error1 = storage.GetComponent<ErrorComponent>(entity1);
             Assert.NotNull(error1);
             Assert.Equal("System failed intentionally.", error1.ErrorMessage);
 
-            // Check entity2: Error from ExampleSystem (last failure) overwrites previous
+            // The first failed system is a fatal stage boundary, so the later
+            // system is not dispatched.
             var error2 = storage.GetComponent<ErrorComponent>(entity2);
             Assert.NotNull(error2);
-            // *** Corrected Assertion ***
-            Assert.Equal("Component missing.", error2.ErrorMessage);
+            Assert.Equal("System failed intentionally.", error2.ErrorMessage);
+            Assert.True(error1!.IsFatal);
+            Assert.True(error2.IsFatal);
         }
 
         [Fact]
@@ -135,6 +138,56 @@ namespace DOPipeline.Test.Pipeline
 
             Assert.False(result.IsSuccess);
             Assert.Equal("Set failed.", result.ErrorMessage);
+        }
+
+        [Fact]
+        public void Execute_LoggerFailureStillRunsScopeCleanup()
+        {
+            var scoped = new ScopedSystem();
+            var pipe = new Pipe("Scope Pipe").AddSystem(scoped);
+            var result = pipe.Execute(
+                new[] { new Entity() },
+                new ComponentStorage(),
+                new ThrowingProgressLogger());
+
+            Assert.True(result.IsSuccess);
+            Assert.True(scoped.Ended);
+        }
+
+        [Fact]
+        public void Execute_PreservesFatalResultWhenCleanupCancels()
+        {
+            using var cancellation = new CancellationTokenSource();
+            var system = new FailingScopedSystem(cancellation);
+            var pipe = new Pipe("Scope Pipe").AddSystem(system);
+
+            var result = pipe.Execute(
+                new[] { new Entity() },
+                new ComponentStorage(),
+                null,
+                cancellation.Token);
+
+            Assert.False(result.IsSuccess);
+            Assert.False(result.IsCancellation);
+            Assert.Equal("initiating fatal error", result.ErrorMessage);
+            Assert.True(system.Ended);
+        }
+
+        [Fact]
+        public void Execute_PreservesOriginalExceptionAtStageBoundary()
+        {
+            var expected = new IOException("source failure");
+            var pipe = new Pipe("Exception Pipe")
+                .AddSystem(new ReturningFailureSystem(expected));
+
+            var result = pipe.Execute(
+                new[] { new Entity() },
+                new ComponentStorage());
+
+            Assert.False(result.IsSuccess);
+            Assert.False(result.IsCancellation);
+            Assert.Same(expected, result.Exception);
+            Assert.Equal("source failure", result.ErrorMessage);
         }
 
         private sealed class CountingEntitySetSystem : IEntitySetSystem
@@ -167,6 +220,58 @@ namespace DOPipeline.Test.Pipeline
             {
                 return Result.Fail("Entity execution should not be used for a set system.");
             }
+        }
+
+        private sealed class ScopedSystem : ISystem, IExecutionScopedSystem
+        {
+            public bool Ended { get; private set; }
+
+            public Result BeginExecution(IEnumerable<Entity> entities, IComponentStorage storage) => Result.Success();
+
+            public Result Execute(Entity entity, IComponentStorage storage) => Result.Success();
+
+            public Result EndExecution(IEnumerable<Entity> entities, IComponentStorage storage)
+            {
+                Ended = true;
+                return Result.Success();
+            }
+        }
+
+        private sealed class FailingScopedSystem(CancellationTokenSource cancellation)
+            : ISystem, IExecutionScopedSystem
+        {
+            public bool Ended { get; private set; }
+
+            public Result BeginExecution(IEnumerable<Entity> entities, IComponentStorage storage) => Result.Success();
+
+            public Result Execute(Entity entity, IComponentStorage storage) =>
+                Result.Fail("initiating fatal error");
+
+            public Result EndExecution(IEnumerable<Entity> entities, IComponentStorage storage)
+            {
+                Ended = true;
+                cancellation.Cancel();
+                return Result.Success();
+            }
+        }
+
+        private sealed class ThrowingProgressLogger : IPipelineLogger, IProgressLogger
+        {
+            public void Log(string message)
+            {
+            }
+
+            public void ReportProgress(string message) => throw new IOException("logger failed");
+
+            public void Dispose()
+            {
+            }
+        }
+
+        private sealed class ReturningFailureSystem(Exception exception) : ISystem
+        {
+            public Result Execute(Entity entity, IComponentStorage storage) =>
+                Result.Fail(exception.Message, exception);
         }
     }
 }

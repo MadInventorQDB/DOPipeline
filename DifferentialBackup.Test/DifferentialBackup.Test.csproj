@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\DifferentialBackup\DifferentialBackup.csproj" />
+    <ProjectReference Include="..\DifferentialBackup.TestHost\DifferentialBackup.TestHost.csproj" />
   </ItemGroup>
 
   <ItemGroup>

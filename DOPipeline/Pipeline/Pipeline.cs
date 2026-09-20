@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Linq; // Added for ToList()
+using System.Threading;
 using DOPipeline.Entities;
 using DOPipeline.Logging; // <-- Added using
 using DOPipeline.Storage;
@@ -46,39 +47,71 @@ namespace DOPipeline.Pipeline
         /// unless a pipe's execution logic itself fails catastrophically (which is currently not the case in Pipe.Execute).</returns>
         public Result Execute(IEnumerable<Entity> entities, IComponentStorage storage)
         {
+            return Execute(entities, storage, CancellationToken.None);
+        }
+
+        /// <summary>
+        /// Executes all pipes while honoring the caller's cancellation token.
+        /// </summary>
+        public Result Execute(
+            IEnumerable<Entity> entities,
+            IComponentStorage storage,
+            CancellationToken cancellationToken)
+        {
             var currentEntities = entities.ToList(); // Make a copy to work with
 
-            _logger.Log($"Pipeline starting execution with {_pipes.Count} pipe(s). Initial entity count: {currentEntities.Count}");
+            TryLog($"Pipeline starting execution with {_pipes.Count} pipe(s). Initial entity count: {currentEntities.Count}");
 
             int pipeIndex = 0;
             foreach (var pipe in _pipes)
             {
                 pipeIndex++;
-                _logger.Log($"Executing Pipe {pipeIndex}/{_pipes.Count}: '{pipe.Name}' on {currentEntities.Count} entities...");
+                TryLog($"Executing Pipe {pipeIndex}/{_pipes.Count}: '{pipe.Name}' on {currentEntities.Count} entities...");
 
                 // Execute the current pipe on the current set of entities
-                var pipeResult = pipe.Execute(currentEntities, storage, _logger); // Pipe.Execute internally handles system results
+                var pipeResult = pipe.Execute(currentEntities, storage, _logger, cancellationToken);
 
                 if (!pipeResult.IsSuccess)
                 {
                     // This typically indicates a fundamental issue within the Pipe.Execute logic itself,
                     // not just individual system failures (which add ErrorComponents).
-                    _logger.Log($"[ERROR] Pipe '{pipe.Name}' execution failed fundamentally: {pipeResult.ErrorMessage}. Halting pipeline.");
-                    return Result.Fail($"Pipeline halted due to failure in pipe '{pipe.Name}': {pipeResult.ErrorMessage}");
+                    TryLog($"[ERROR] Pipe '{pipe.Name}' execution failed fundamentally: {pipeResult.ErrorMessage}. Halting pipeline.");
+                    // A cancellation token may be set while cleanup is
+                    // running after a real failure. Preserve the initiating
+                    // non-cancellation failure and its exit classification.
+                    if (pipeResult.IsCancellation)
+                    {
+                        return Result.Cancelled(pipeResult.ErrorMessage);
+                    }
+
+                    return pipeResult;
                 }
                 else
                 {
-                    _logger.Log($"Pipe '{pipe.Name}' finished execution.");
+                    TryLog($"Pipe '{pipe.Name}' finished execution.");
                 }
 
                 // Refresh the list of entities from storage for the next pipe.
                 // This is important if systems within the executed pipe added or removed entities.
                 currentEntities = storage.GetAllEntities();
-                _logger.Log($"Entity count after Pipe '{pipe.Name}': {currentEntities.Count}");
+                TryLog($"Entity count after Pipe '{pipe.Name}': {currentEntities.Count}");
             }
 
-            _logger.Log("Pipeline execution finished successfully.");
-            return Result.Success(); // Pipeline completes even if some systems failed (they add ErrorComponent)
+            TryLog("Pipeline execution finished successfully.");
+            return Result.Success();
+        }
+
+        private void TryLog(string message)
+        {
+            try
+            {
+                _logger.Log(message);
+            }
+            catch
+            {
+                // Logging is diagnostic infrastructure and cannot replace the
+                // operation result or prevent scope cleanup.
+            }
         }
     }
 }

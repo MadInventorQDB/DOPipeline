@@ -10,12 +10,20 @@ namespace DifferentialBackup.Utilities
     {
         public static ConcurrentDictionary<string, string> LoadFileHashes(string filePath)
         {
-            if (File.Exists(filePath))
+            if (!File.Exists(filePath))
             {
-                var json = File.ReadAllText(filePath);
-                return JsonSerializer.Deserialize<ConcurrentDictionary<string, string>>(json) ?? new ConcurrentDictionary<string, string>();
+                return new ConcurrentDictionary<string, string>();
             }
-            return new ConcurrentDictionary<string, string>();
+
+            try
+            {
+                var value = JsonSerializer.Deserialize<ConcurrentDictionary<string, string>>(File.ReadAllText(filePath));
+                return value ?? throw new InvalidDataException($"State file is null: '{filePath}'.");
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidDataException($"State file is malformed: '{filePath}'.", ex);
+            }
         }
 
         public static void SaveFileHashes(ConcurrentDictionary<string, string> fileHashes, string filePath)
@@ -26,12 +34,20 @@ namespace DifferentialBackup.Utilities
 
         public static HashSet<DateTime> LoadBackupDates(string filePath)
         {
-            if (File.Exists(filePath))
+            if (!File.Exists(filePath))
             {
-                var json = File.ReadAllText(filePath);
-                return JsonSerializer.Deserialize<HashSet<DateTime>>(json) ?? new HashSet<DateTime>();
+                return new HashSet<DateTime>();
             }
-            return new HashSet<DateTime>();
+
+            try
+            {
+                var value = JsonSerializer.Deserialize<HashSet<DateTime>>(File.ReadAllText(filePath));
+                return value ?? throw new InvalidDataException($"State file is null: '{filePath}'.");
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidDataException($"State file is malformed: '{filePath}'.", ex);
+            }
         }
 
         public static void SaveBackupDates(HashSet<DateTime> backupDates, string filePath)
@@ -42,9 +58,29 @@ namespace DifferentialBackup.Utilities
 
         private static void WriteAllTextAtomic(string filePath, string contents)
         {
-            var temporaryPath = filePath + ".tmp";
-            File.WriteAllText(temporaryPath, contents);
-            File.Move(temporaryPath, filePath, true);
+            var temporaryPath = filePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                using (var writer = new StreamWriter(stream))
+                {
+                    writer.Write(contents);
+                    writer.Flush();
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(temporaryPath, filePath, true);
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch
+                {
+                    // Cleanup must not replace the state-write error.
+                }
+            }
         }
     }
 }

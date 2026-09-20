@@ -4,17 +4,19 @@ namespace DifferentialBackup.Components
 {
     public sealed class BackupPartComponent : IComponent
     {
-        public int PartNumber { get; init; }
+        public Guid RunId { get; set; }
 
-        public DateTime BackupDate { get; init; }
+        public int PartNumber { get; set; }
 
-        public string ArchiveFileName { get; init; } = string.Empty;
+        public DateTime BackupDate { get; set; }
 
-        public string Fingerprint { get; init; } = string.Empty;
+        public string ArchiveFileName { get; set; } = string.Empty;
 
-        public long SourceBytes { get; init; }
+        public string Fingerprint { get; set; } = string.Empty;
 
-        public IReadOnlyList<BackupPartFile> Files { get; init; } = Array.Empty<BackupPartFile>();
+        public long SourceBytes { get; set; }
+
+        public IReadOnlyList<BackupPartFile> Files { get; set; } = Array.Empty<BackupPartFile>();
     }
 
     public sealed record BackupPartFile(

@@ -6,11 +6,14 @@ namespace DifferentialBackup.Components
     {
         Planned,
         Staged,
-        Transferred
+        Transferred,
+        Omitted
     }
 
     public sealed class BackupPartStatusComponent : IComponent
     {
+        public Guid RunId { get; set; }
+
         public BackupPartState State { get; set; }
 
         public string LocalArchivePath { get; set; } = string.Empty;

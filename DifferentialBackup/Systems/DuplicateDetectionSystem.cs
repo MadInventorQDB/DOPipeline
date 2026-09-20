@@ -3,62 +3,40 @@ using DOPipeline.Storage;
 using DOPipeline.Systems;
 using DOPipeline.Utilities;
 using DifferentialBackup.Components;
-using System;
-using System.Linq;
-using System.Collections.Generic;
 
-namespace DifferentialBackup.Systems
+namespace DifferentialBackup.Systems;
+
+/// <summary>Builds duplicate groups from explicit file/hash component rows.</summary>
+public sealed class DuplicateDetectionSystem : IEntitySetSystem
 {
-    public class DuplicateDetectionSystem : ISystem
+    public Result Execute(IReadOnlyList<Entity> entities, IComponentStorage storage)
     {
-        private List<List<string>>? _cachedGroups;
-        private bool _processed;
+        var files = storage.Query<FilePathComponent, FileHashComponent>()
+            .Select(entity => new
+            {
+                Path = storage.GetComponent<FilePathComponent>(entity)!.FilePath,
+                Hash = storage.GetComponent<FileHashComponent>(entity)!.CurrentHash
+            })
+            .Where(value => !string.IsNullOrWhiteSpace(value.Path) && !string.IsNullOrWhiteSpace(value.Hash))
+            .ToList();
 
-        public DuplicateDetectionSystem()
+        var groups = files
+            .GroupBy(value => value.Hash, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Select(value => value.Path).OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToList())
+            .ToList();
+
+        var roots = storage.Query<DirectoryWorkComponent>()
+            .Where(entity => storage.GetComponent<DirectoryWorkComponent>(entity)?.IsRoot == true)
+            .ToList();
+        foreach (var root in roots)
         {
+            storage.SetComponent(root, new DuplicateFilesComponent { Groups = groups });
         }
 
-        public Result Execute(Entity entity, IComponentStorage storage)
-        {
-            // This system should only operate once on the root entity. Other entities
-            // represent individual files and are ignored here. We identify the root by
-            // checking that its FilePath points to a directory rather than a file.
-            var pathComponent = storage.GetComponent<FilePathComponent>(entity);
-            if (pathComponent == null || File.Exists(pathComponent.FilePath))
-            {
-                return Result.Success();
-            }
-
-            try
-            {
-                if (!_processed)
-                {
-                    var files = storage.GetAllEntities()
-                        .Where(e => storage.HasComponent<FileHashComponent>(e))
-                        .Select(e => new
-                        {
-                            Path = storage.GetComponent<FilePathComponent>(e)?.FilePath,
-                            Hash = storage.GetComponent<FileHashComponent>(e)?.CurrentHash
-                        })
-                        .Where(x => x.Path != null && x.Hash != null)
-                        .ToList();
-
-                    _cachedGroups = files
-                        .GroupBy(f => f.Hash)
-                        .Where(g => g.Count() > 1)
-                        .Select(g => g.Select(f => f.Path!).ToList())
-                        .ToList();
-
-                    _processed = true;
-                }
-
-                storage.SetComponent(entity, new DuplicateFilesComponent { Groups = _cachedGroups ?? new List<List<string>>() });
-                return Result.Success();
-            }
-            catch (Exception ex)
-            {
-                return Result.Fail($"Failed to detect duplicates: {ex.Message}");
-            }
-        }
+        return Result.Success();
     }
+
+    public Result Execute(Entity entity, IComponentStorage storage) =>
+        Execute(storage.GetAllEntities(), storage);
 }
