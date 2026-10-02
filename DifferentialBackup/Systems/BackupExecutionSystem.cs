@@ -183,6 +183,7 @@ namespace DifferentialBackup.Systems
                 });
 
                 Exception? producerError = null;
+                FileWorkLookup? fileWorkLookup = null;
                 try
                 {
                     foreach (var item in pendingParts)
@@ -195,7 +196,8 @@ namespace DifferentialBackup.Systems
                             if (item.Status.State == BackupPartState.Planned)
                             {
                                 _runState.Checkpoint("producer-part-starting");
-                                CompressPart(item, progress, storage);
+                                fileWorkLookup ??= new FileWorkLookup(storage);
+                                CompressPart(item, progress, storage, fileWorkLookup);
                             }
 
                             if (item.Status.State != BackupPartState.Omitted)
@@ -494,7 +496,8 @@ namespace DifferentialBackup.Systems
         private void CompressPart(
             PartEntity item,
             BackupProgressTracker progress,
-            IComponentStorage storage)
+            IComponentStorage storage,
+            FileWorkLookup fileWorkLookup)
         {
             var part = item.Part;
             var status = item.Status;
@@ -617,7 +620,7 @@ namespace DifferentialBackup.Systems
                             Files = part.Files.ToList()
                         });
                         status.State = BackupPartState.Staged;
-                        MarkCaptured(part, storage);
+                        MarkCaptured(part, storage, fileWorkLookup);
                         SetReceipt(item, storage);
                         progress.CompleteCompressionPart(part);
                         return;
@@ -646,7 +649,8 @@ namespace DifferentialBackup.Systems
                         failedFile,
                         sourceFailure ?? new IOException("Source capture failed."),
                         part.RunId,
-                        storage);
+                        storage,
+                        fileWorkLookup);
                 remaining.RemoveAll(candidate => string.Equals(
                     candidate.SourcePath,
                     failedFile.SourcePath,
@@ -671,17 +675,12 @@ namespace DifferentialBackup.Systems
             BackupPartFile file,
             Exception exception,
             Guid runId,
-            IComponentStorage storage)
+            IComponentStorage storage,
+            FileWorkLookup fileWorkLookup)
         {
-            foreach (var entity in storage.Query<FileWorkComponent>())
+            var entity = fileWorkLookup.Find(runId, file.SourcePath);
+            if (entity != null && storage.GetComponent<FileWorkComponent>(entity) is { } work)
             {
-                var work = storage.GetComponent<FileWorkComponent>(entity);
-                if (work == null || work.RunId != runId ||
-                    !string.Equals(work.SourcePath, file.SourcePath, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
                 work.State = FileWorkState.Deferred;
                 work.PartNumber = null;
                 storage.SetComponent(entity, work);
@@ -708,13 +707,15 @@ namespace DifferentialBackup.Systems
             var created = new Entity();
             var nowForCreated = DateTimeOffset.UtcNow;
             storage.SetComponent(created, new FilePathComponent { FilePath = file.SourcePath });
-            storage.SetComponent(created, new FileWorkComponent
+            var createdWork = new FileWorkComponent
             {
                 RunId = runId,
                 SourcePath = file.SourcePath,
                 StableKey = file.SourcePath,
                 State = FileWorkState.Deferred
-            });
+            };
+            storage.SetComponent(created, createdWork);
+            fileWorkLookup.Add(created, createdWork);
             storage.SetComponent(created, new BackupIssueComponent
             {
                 RunId = runId,
@@ -731,28 +732,32 @@ namespace DifferentialBackup.Systems
             });
         }
 
-        private static void MarkCaptured(BackupPartComponent part, IComponentStorage storage)
+        private static void MarkCaptured(
+            BackupPartComponent part,
+            IComponentStorage storage,
+            FileWorkLookup fileWorkLookup)
         {
             foreach (var file in part.Files)
             {
-                foreach (var entity in storage.Query<FileWorkComponent>())
+                var entity = fileWorkLookup.Find(part.RunId, file.SourcePath);
+                if (entity == null)
                 {
-                    var work = storage.GetComponent<FileWorkComponent>(entity);
-                    if (work == null || work.RunId != part.RunId ||
-                        !string.Equals(work.SourcePath, file.SourcePath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    work.State = FileWorkState.Captured;
-                    storage.SetComponent(entity, work);
-                    var issue = storage.GetComponent<BackupIssueComponent>(entity);
-                    if (issue != null)
-                    {
-                        issue.Resolved = true;
-                        storage.SetComponent(entity, issue);
-                    }
-                    break;
+                var work = storage.GetComponent<FileWorkComponent>(entity);
+                if (work == null)
+                {
+                    continue;
+                }
+
+                work.State = FileWorkState.Captured;
+                storage.SetComponent(entity, work);
+                var issue = storage.GetComponent<BackupIssueComponent>(entity);
+                if (issue != null)
+                {
+                    issue.Resolved = true;
+                    storage.SetComponent(entity, issue);
                 }
             }
         }
@@ -1027,6 +1032,45 @@ namespace DifferentialBackup.Systems
         private sealed record PartEntity(
             BackupPartComponent Part,
             BackupPartStatusComponent Status);
+
+        private sealed class FileWorkLookup
+        {
+            private readonly Dictionary<Guid, Dictionary<string, Entity>> _entitiesByRun = new();
+
+            public FileWorkLookup(IComponentStorage storage)
+            {
+                // Build once per execution, rather than copying and searching
+                // the complete file query for every captured or deferred file.
+                foreach (var entity in storage.Query<FileWorkComponent>())
+                {
+                    var work = storage.GetComponent<FileWorkComponent>(entity);
+                    if (work != null)
+                    {
+                        Add(entity, work);
+                    }
+                }
+            }
+
+            public Entity? Find(Guid runId, string sourcePath)
+            {
+                return _entitiesByRun.TryGetValue(runId, out var paths) &&
+                    paths.TryGetValue(sourcePath, out var entity)
+                    ? entity
+                    : null;
+            }
+
+            public void Add(Entity entity, FileWorkComponent work)
+            {
+                if (!_entitiesByRun.TryGetValue(work.RunId, out var paths))
+                {
+                    paths = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
+                    _entitiesByRun.Add(work.RunId, paths);
+                }
+
+                // Preserve the first matching row if a world contains duplicates.
+                paths.TryAdd(work.SourcePath, entity);
+            }
+        }
 
         private sealed class BackupProgressTracker
         {
