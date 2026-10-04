@@ -13,7 +13,7 @@ if (args.Length >= 4 && args[0].Equals("restore", StringComparison.OrdinalIgnore
     return RunRestore(args);
 }
 
-if (args.Length < 5 || !args[0].Equals("backup", StringComparison.OrdinalIgnoreCase))
+if (args.Length < 5 || !args[0].Equals("backup", StringComparison.OrdinalIgnoreCase) && !args[0].Equals("tagged-backup", StringComparison.OrdinalIgnoreCase))
 {
     Console.Error.WriteLine("backup <source> <destination> <staging> <hashes> <dates> [checkpoint] [signal] [release]");
     return 2;
@@ -106,18 +106,23 @@ static int RunBackup(string[] args)
     var signalPath = args.Length > 7 ? Path.GetFullPath(args[7]) : string.Empty;
     var releasePath = args.Length > 8 ? Path.GetFullPath(args[8]) : string.Empty;
 
-    using var stateLock = ExclusiveOperationLock.Acquire(hashesPath + ".lock");
-    using var destinationLock = ExclusiveOperationLock.Acquire(Path.Combine(destination, ".backup.lock"));
+    var tagged = args[0].Equals("tagged-backup", StringComparison.Ordinal);
+    using var stateLock = tagged ? null : ExclusiveOperationLock.Acquire(hashesPath + ".lock");
+    using var destinationLock = tagged ? null : ExclusiveOperationLock.Acquire(Path.Combine(destination, ".backup.lock"));
     using var cancellation = new CancellationTokenSource();
     var observer = new BlockingCheckpointObserver(checkpoint, signalPath, releasePath,
         args.Length > 9 ? args[9] : null, cancellation, args.Length > 10 ? args[10] : "");
     var clock = new FixtureClock();
-    var runState = new BackupRunState(source, destination, staging, observer);
-    var hashes = DataPersistence.LoadFileHashes(hashesPath);
-    var dates = DataPersistence.LoadBackupDates(datesPath);
+    using var session = tagged ? BackupRunSession.Open(source, destination, staging, observer) : null;
+    if (session?.CleanupCompleted == true) return session.CompletionExitCode;
+    if (session != null) { source = session.SourceDirectory; destination = session.BackupDestination; }
+    var runState = session?.CreateRunState() ?? new BackupRunState(source, destination, staging, observer);
+    var hashes = runState.DestinationState?.LoadHashes() ?? DataPersistence.LoadFileHashes(hashesPath);
+    var dates = tagged ? DestinationStateStore.ReadHistory(destination) : DataPersistence.LoadBackupDates(datesPath);
+    if (tagged) hashesPath = datesPath = runState.DestinationState!.StatePath;
     var storage = new ComponentStorage();
     var operation = new Entity();
-    var runId = Guid.NewGuid();
+    var runId = session?.RunId ?? Guid.NewGuid();
     storage.SetComponent(operation, new OperationComponent
     {
         RunId = runId,
@@ -147,6 +152,7 @@ static int RunBackup(string[] args)
         if (!result.IsSuccess)
         {
             Console.Error.WriteLine(result.ErrorMessage);
+            if (tagged) Console.Error.WriteLine(result.Exception);
             if (result.IsCancellation)
                 storage.SetComponent(operation, new CancellationSignalComponent
                 {
@@ -162,7 +168,11 @@ static int RunBackup(string[] args)
             return storage.GetComponent<OperationOutcomeComponent>(operation)!.ExitCode;
         }
         var outcome = storage.GetComponent<OperationOutcomeComponent>(operation);
-        if (outcome != null) return outcome.ExitCode;
+        if (outcome != null)
+        {
+            if (outcome.ExitCode is 0 or 1) session?.Complete(runState, outcome.ExitCode);
+            return outcome.ExitCode;
+        }
         if (storage.GetComponent<OperationWaitComponent>(operation) is { } wait)
             clock.Now = wait.WakeAtUtc;
     }

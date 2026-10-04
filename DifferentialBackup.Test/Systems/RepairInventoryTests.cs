@@ -104,7 +104,7 @@ public sealed partial class BackupRecoveryRegressionTests
         }
         else
         {
-            File.WriteAllText(state.JobPath, kind == "null" ? "null" : File.ReadAllText(state.JobPath).Replace("\"FormatVersion\":2", "\"FormatVersion\":999"));
+            File.WriteAllText(state.JobPath, kind == "null" ? "null" : File.ReadAllText(state.JobPath).Replace($"\"FormatVersion\":{BackupJobState.CurrentFormatVersion}", "\"FormatVersion\":999"));
             badPath = state.JobPath;
         }
         var before = File.ReadAllBytes(badPath);

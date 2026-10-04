@@ -182,7 +182,7 @@ public sealed partial class BackupRecoveryRegressionTests : IDisposable
         Assert.Equal(FileWorkState.Deferred, recoveredDeferred.State);
         Assert.NotNull(secondStorage.Query<BackupIssueComponent>()
             .Select(entity => secondStorage.GetComponent<BackupIssueComponent>(entity)!)
-            .SingleOrDefault(issue => string.Equals(issue.StableKey, firstFile, StringComparison.OrdinalIgnoreCase)));
+            .SingleOrDefault(issue => string.Equals(issue.Path, firstFile, StringComparison.Ordinal)));
 
         var recoveredPart = secondStorage.Query<BackupPartComponent>()
             .Single(entity => secondStorage.GetComponent<BackupPartComponent>(entity)!.PartNumber == 2);

@@ -85,7 +85,8 @@ public sealed class IncompleteBackupPipelineTests : IDisposable
         var manifest = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(Path.Combine(backupSet, "manifest.json")));
         Assert.NotNull(manifest);
         Assert.False(manifest!.IsComplete);
-        Assert.Contains(locked, manifest.Issues.Select(issue => issue.Path));
+        Assert.Contains("locked.txt", manifest.Issues.Select(issue => issue.Path));
+        Assert.Contains(locked, manifest.Issues.Select(issue => issue.OriginalPath));
         using var archive = ZipFile.OpenRead(Path.Combine(backupSet, "part-000001.zip"));
         Assert.NotNull(archive.GetEntry("healthy.txt"));
         Assert.Null(archive.GetEntry("locked.txt"));

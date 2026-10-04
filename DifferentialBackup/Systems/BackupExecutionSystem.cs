@@ -340,7 +340,7 @@ namespace DifferentialBackup.Systems
                 var manifestPath = Path.Combine(run.FinalDirectory, "manifest.json");
                 var manifest = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(manifestPath));
                 if (manifest == null ||
-                    manifest.FormatVersion != BackupManifest.CurrentFormatVersion ||
+                    manifest.FormatVersion is not (2 or 3 or 4) ||
                     !string.Equals(manifest.PlanFingerprint, run.PlanFingerprint, StringComparison.Ordinal) ||
                     manifest.Parts.Count != parts.Count)
                 {
@@ -654,7 +654,7 @@ namespace DifferentialBackup.Systems
                 remaining.RemoveAll(candidate => string.Equals(
                     candidate.SourcePath,
                     failedFile.SourcePath,
-                    StringComparison.OrdinalIgnoreCase));
+                    StringComparison.Ordinal));
             }
 
             part.Files = Array.Empty<BackupPartFile>();
@@ -711,7 +711,7 @@ namespace DifferentialBackup.Systems
             {
                 RunId = runId,
                 SourcePath = file.SourcePath,
-                StableKey = file.SourcePath,
+                StableKey = file.EntryName,
                 State = FileWorkState.Deferred
             };
             storage.SetComponent(created, createdWork);
@@ -720,7 +720,7 @@ namespace DifferentialBackup.Systems
             {
                 RunId = runId,
                 Path = file.SourcePath,
-                StableKey = file.SourcePath,
+                StableKey = file.EntryName,
                 Stage = "Capture",
                 Category = "SourceRead",
                 OriginalMessage = exception.Message,
@@ -780,6 +780,8 @@ namespace DifferentialBackup.Systems
                 {
                     _runState.Checkpoint("transfer-part-starting");
                     File.Delete(copyingPath);
+                    if (File.Exists(copyingPath))
+                        throw new IOException($"Transfer temporary path still exists after removal: '{copyingPath}'.");
                     EnsureDestinationCapacity(run.BackupDestination, status.ArchiveBytes);
                     await using (var input = new FileStream(
                         status.LocalArchivePath,
@@ -972,30 +974,12 @@ namespace DifferentialBackup.Systems
             var largestPart = plannedParts.Max(item => item.Part.SourceBytes);
             var boundedPartCount = Math.Min(plannedParts.Count, _options.TransferQueueCapacity + 1);
             var requiredBytes = checked(largestPart * boundedPartCount);
-            EnsureDriveCapacity(run.StagingDirectory, requiredBytes, "local staging");
+            DiskSpaceUtility.EnsureCapacity(run.StagingDirectory, requiredBytes, "local staging");
         }
 
         private static void EnsureDestinationCapacity(string destination, long requiredBytes)
         {
-            EnsureDriveCapacity(destination, requiredBytes, "backup destination");
-        }
-
-        private static void EnsureDriveCapacity(string path, long requiredBytes, string label)
-        {
-            var root = Path.GetPathRoot(Path.GetFullPath(path));
-            if (string.IsNullOrWhiteSpace(root))
-            {
-                return;
-            }
-
-            var drive = new DriveInfo(root);
-            if (drive.IsReady && drive.AvailableFreeSpace < requiredBytes)
-            {
-                throw new IOException(
-                    $"Not enough free space in {label}. " +
-                    $"Required: {requiredBytes / 1024d / 1024d:0.0} MB; " +
-                    $"available: {drive.AvailableFreeSpace / 1024d / 1024d:0.0} MB.");
-            }
+            DiskSpaceUtility.EnsureCapacity(destination, requiredBytes, "backup destination");
         }
 
         private static CompressionLevel GetCompressionLevel(string filePath)
@@ -1063,7 +1047,7 @@ namespace DifferentialBackup.Systems
             {
                 if (!_entitiesByRun.TryGetValue(work.RunId, out var paths))
                 {
-                    paths = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
+                    paths = new Dictionary<string, Entity>(StringComparer.Ordinal);
                     _entitiesByRun.Add(work.RunId, paths);
                 }
 

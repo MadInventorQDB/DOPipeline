@@ -111,7 +111,8 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
             {
                 if (commit.Step < StateCommitStep.HashesSaved)
                 {
-                    DataPersistence.SaveFileHashes(mergedHashes, _hashesPath);
+                    if (_runState.DestinationState != null) _runState.DestinationState.Commit(_runState);
+                    else DataPersistence.SaveFileHashes(mergedHashes, _hashesPath);
                     _runState.Checkpoint("hash-state-replaced");
                     _runState.SaveStateCommitStep(StateCommitStep.HashesSaved);
                     commit.Step = StateCommitStep.HashesSaved;
@@ -124,7 +125,7 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
                     {
                         publication.BackupDate
                     };
-                    DataPersistence.SaveBackupDates(mergedDates, _datesPath);
+                    if (_runState.DestinationState == null) DataPersistence.SaveBackupDates(mergedDates, _datesPath);
                     _runState.Checkpoint("date-state-replaced");
                     _runState.SaveStateCommitStep(StateCommitStep.DatesSaved);
                     commit.Step = StateCommitStep.DatesSaved;
@@ -169,9 +170,9 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
         IComponentStorage storage)
     {
         var merged = new ConcurrentDictionary<string, string>(_fileHashes,
-            StringComparer.OrdinalIgnoreCase);
-        var seenEntries = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            StringComparer.Ordinal);
+        var seenEntries = new HashSet<string>(StringComparer.Ordinal);
+        var seenSources = new HashSet<string>(StringComparer.Ordinal);
 
         if (publication.PartNumbers.Count == 0 ||
             publication.PartNumbers.Count != publication.PartNumbers.Distinct().Count())
@@ -223,7 +224,7 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
                     throw new InvalidDataException($"Published part {partNumber} contains invalid file descriptors.");
                 }
 
-                merged[descriptor.SourcePath] = descriptor.Hash;
+                merged[_runState.ResolveSourcePath(descriptor.SourcePath)] = descriptor.Hash;
             }
         }
 

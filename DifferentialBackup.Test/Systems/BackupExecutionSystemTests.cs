@@ -37,6 +37,76 @@ namespace DifferentialBackup.Test.Systems
             _runState.BeginRun();
         }
 
+        [UncBackupTheory]
+        [InlineData(false, false)]
+        [InlineData(false, true)]
+        [InlineData(true, false)]
+        [InlineData(true, true)]
+        public void Execute_TransfersToUncDestination(bool resumeStagedPart, bool trailingSeparator)
+        {
+            var shareRoot = Path.GetFullPath(Environment.GetEnvironmentVariable("DIFFERENTIALBACKUP_TEST_UNC_ROOT")!);
+            var destination = Path.Combine(shareRoot, "DifferentialBackup.Test-" + Guid.NewGuid().ToString("N"));
+            Assert.StartsWith(Path.TrimEndingDirectorySeparator(shareRoot) + Path.DirectorySeparatorChar, destination);
+            Directory.CreateDirectory(destination);
+            try
+            {
+                var sourceFile = Path.Combine(_sourceDirectory, "file.txt");
+                File.WriteAllText(sourceFile, "content");
+                var fixture = CreateFixture(new[] { new BackupPartFile(sourceFile, "file.txt", "hash", 7) });
+                fixture.Run.BackupDestination = trailingSeparator ? destination + Path.DirectorySeparatorChar : destination;
+                fixture.Run.WorkingDirectory = Path.Combine(destination, "20260820120000.backup.copying");
+                fixture.Run.FinalDirectory = Path.Combine(destination, "20260820120000.backup");
+                fixture.Status.DestinationArchivePath = Path.Combine(fixture.Run.WorkingDirectory, fixture.Part.ArchiveFileName);
+
+                string? stagedHash = null;
+                if (resumeStagedPart)
+                {
+                    using (var archive = ZipFile.Open(fixture.Status.LocalArchivePath, ZipArchiveMode.Create))
+                    {
+                        using var writer = new StreamWriter(archive.CreateEntry("file.txt").Open());
+                        writer.Write("content");
+                    }
+                    using (var input = File.OpenRead(fixture.Status.LocalArchivePath))
+                    {
+                        stagedHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(input));
+                    }
+                    _runState.SavePartCheckpoint(new BackupPartCheckpoint
+                    {
+                        PartNumber = fixture.Part.PartNumber,
+                        ArchiveFileName = fixture.Part.ArchiveFileName,
+                        Fingerprint = fixture.Part.Fingerprint,
+                        FileCount = 1,
+                        SourceBytes = 7,
+                        ArchiveBytes = new FileInfo(fixture.Status.LocalArchivePath).Length,
+                        ArchiveSha256 = stagedHash,
+                        Files = fixture.Part.Files.ToList()
+                    });
+                    // Recovery must transfer the saved bytes even when the source has gone.
+                    File.Delete(sourceFile);
+                }
+
+                var result = new BackupExecutionSystem(_runState, _options, NullLogger.Instance)
+                    .Execute(fixture.Storage.GetAllEntities(), fixture.Storage);
+
+                Assert.True(result.IsSuccess, result.ErrorMessage);
+                Assert.Equal(BackupPartState.Transferred, fixture.Status.State);
+                Assert.False(File.Exists(fixture.Status.LocalArchivePath));
+                Assert.False(File.Exists(fixture.Status.DestinationArchivePath + ".copying"));
+                if (stagedHash != null)
+                {
+                    using var input = File.OpenRead(fixture.Status.DestinationArchivePath);
+                    Assert.Equal(stagedHash, Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(input)));
+                }
+                using var transferredArchive = ZipFile.OpenRead(fixture.Status.DestinationArchivePath);
+                using var reader = new StreamReader(Assert.Single(transferredArchive.Entries).Open());
+                Assert.Equal("content", reader.ReadToEnd());
+            }
+            finally
+            {
+                Directory.Delete(destination, recursive: true);
+            }
+        }
+
         [Fact]
         public void Execute_CreatesEachArchiveOnceAndTransfersItToWorkingDirectory()
         {
@@ -168,7 +238,7 @@ namespace DifferentialBackup.Test.Systems
                 fixture.Storage.SetComponent(row, new FileWorkComponent
                 {
                     RunId = runId,
-                    SourcePath = file.SourcePath.ToUpperInvariant(),
+                    SourcePath = file.SourcePath,
                     State = FileWorkState.ReadyToCapture
                 });
                 fixture.Storage.SetComponent(row, new BackupIssueComponent { RunId = runId });
@@ -226,7 +296,7 @@ namespace DifferentialBackup.Test.Systems
             var row = new Entity();
             fixture.Storage.SetComponent(row, new FileWorkComponent
             {
-                SourcePath = missingFile.ToUpperInvariant(),
+                SourcePath = missingFile,
                 StableKey = "existing-key",
                 State = FileWorkState.ReadyToCapture,
                 PartNumber = 1

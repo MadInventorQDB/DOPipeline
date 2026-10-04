@@ -28,8 +28,10 @@ public sealed partial class BackupRecoveryRegressionTests
         var world = CreateBackupWorld(p.Source, p.Destination);
         var op = world.Query<OperationComponent>().Single();
         var state = new BackupRunState(p.Source, p.Destination, p.Staging);
-        using (var locked = new FileStream(blocked == "hashes" ? p.Hashes : p.Dates,
-            FileMode.Open, FileAccess.Read, FileShare.Read))
+        var blockedPath = blocked == "hashes" ? p.Hashes : p.Dates;
+        File.Delete(blockedPath);
+        Directory.CreateDirectory(blockedPath);
+        try
         {
             var result = BackupPipelineBuilder.BuildBackupPipeline(p.Source, p.Destination,
                 new(), new(), NullLogger.Instance, state, hashesPath: p.Hashes, backupDatesPath: p.Dates)
@@ -48,6 +50,7 @@ public sealed partial class BackupRecoveryRegressionTests
             Assert.Equal(blocked == "hashes" ? StateCommitStep.Pending : StateCommitStep.HashesSaved,
                 state.Job!.StateCommitStep);
         }
+        finally { Directory.Delete(blockedPath); }
         File.Delete(file);
         var recovered = CreateBackupWorld(p.Source, p.Destination);
         var result2 = BackupPipelineBuilder.BuildBackupPipeline(p.Source, p.Destination,

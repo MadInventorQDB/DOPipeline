@@ -19,7 +19,8 @@ public static class BackupIndexReader
         if (!string.Equals(Convert.ToHexString(SHA256.HashData(stream)), part.IndexSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException($"Backup index checksum is invalid: '{path}'.");
         var index = JsonSerializer.Deserialize<BackupPartCheckpoint>(File.ReadAllText(path));
-        if (index == null || index.PartNumber != part.PartNumber || index.ArchiveFileName != part.ArchiveFileName ||
+        if (index == null || index.FormatVersion is not (2 or 3) ||
+            index.PartNumber != part.PartNumber || index.ArchiveFileName != part.ArchiveFileName ||
             index.FileCount != part.FileCount || index.SourceBytes != part.SourceBytes || index.ArchiveBytes != part.ArchiveBytes ||
             !string.Equals(index.ArchiveSha256, part.ArchiveSha256, StringComparison.OrdinalIgnoreCase) ||
             index.Files == null || index.Files.Count != index.FileCount || index.Files.Sum(file => file.Length) != index.SourceBytes ||

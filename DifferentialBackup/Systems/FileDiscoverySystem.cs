@@ -3,6 +3,7 @@ using DOPipeline.Storage;
 using DOPipeline.Systems;
 using DOPipeline.Utilities;
 using DifferentialBackup.Components;
+using DifferentialBackup.Utilities;
 
 namespace DifferentialBackup.Systems;
 
@@ -65,7 +66,7 @@ public sealed class FileDiscoverySystem : ISystem
             directory = new DirectoryWorkComponent
             {
                 RunId = runId,
-                StableKey = _sourceDirectory,
+                StableKey = ".",
                 NormalizedPath = _sourceDirectory,
                 DisplayPath = rootPath ?? _sourceDirectory,
                 RequestedPass = pass,
@@ -161,7 +162,7 @@ public sealed class FileDiscoverySystem : ISystem
             possibleFile.State = FileWorkState.Omitted;
             context.Storage.SetComponent(directoryEntity, possibleFile);
         }
-        if (IsReparsePoint(path))
+        if (!PathsEqual(path, _sourceDirectory) && IsReparsePoint(path))
         {
             directory.State = DirectoryWorkState.Omitted;
             SetIssue(directoryEntity, directory.StableKey, path, "Discovery", "UnsupportedFilesystemObject", null, false, context.Storage);
@@ -201,6 +202,7 @@ public sealed class FileDiscoverySystem : ISystem
                     return Result.Success();
                 }
 
+                if (PathsEqual(path, _sourceDirectory) && BackupRunSession.IsReservedRootFile(info.Name)) continue;
                 AddEntry(info.FullName, info, context);
             }
 
@@ -259,7 +261,7 @@ public sealed class FileDiscoverySystem : ISystem
                 var work = context.Storage.GetComponent<DirectoryWorkComponent>(entity) ?? new DirectoryWorkComponent
                 {
                     RunId = context.RunId,
-                    StableKey = entryPath,
+                    StableKey = Relative(_sourceDirectory, entryPath),
                     NormalizedPath = entryPath,
                     DisplayPath = entryPath,
                     State = DirectoryWorkState.Omitted,
@@ -275,16 +277,16 @@ public sealed class FileDiscoverySystem : ISystem
                 var reparseFile = context.Storage.GetComponent<FileWorkComponent>(entity) ?? new FileWorkComponent
                 {
                     RunId = context.RunId,
-                    StableKey = entryPath,
+                    StableKey = Relative(_sourceDirectory, entryPath),
                     SourcePath = entryPath,
-                    RelativePath = Path.GetRelativePath(_sourceDirectory, entryPath),
+                    RelativePath = Relative(_sourceDirectory, entryPath),
                     RequestedPass = context.Pass,
                     LastAttemptedPass = context.Pass
                 };
                 reparseFile.RunId = context.RunId;
-                reparseFile.StableKey = entryPath;
+                reparseFile.StableKey = Relative(_sourceDirectory, entryPath);
                 reparseFile.SourcePath = entryPath;
-                reparseFile.RelativePath = Path.GetRelativePath(_sourceDirectory, entryPath);
+                reparseFile.RelativePath = Relative(_sourceDirectory, entryPath);
                 reparseFile.State = FileWorkState.Omitted;
                 reparseFile.RequestedPass = context.Pass;
                 reparseFile.LastAttemptedPass = context.Pass;
@@ -336,7 +338,7 @@ public sealed class FileDiscoverySystem : ISystem
         context.Storage.SetComponent(created, new DirectoryWorkComponent
         {
             RunId = context.RunId,
-            StableKey = normalized,
+            StableKey = Relative(context.SourceDirectory, normalized),
             NormalizedPath = normalized,
             DisplayPath = path,
             RequestedPass = 0
@@ -357,12 +359,12 @@ public sealed class FileDiscoverySystem : ISystem
         }
 
         var created = new Entity();
-        var relative = Path.GetRelativePath(context.SourceDirectory, normalized);
+        var relative = Relative(context.SourceDirectory, normalized);
         context.Storage.SetComponent(created, new FilePathComponent { FilePath = path });
         context.Storage.SetComponent(created, new FileWorkComponent
         {
             RunId = context.RunId,
-            StableKey = normalized,
+            StableKey = Relative(context.SourceDirectory, normalized),
             SourcePath = normalized,
             RelativePath = relative,
             RequestedPass = 0
@@ -395,6 +397,10 @@ public sealed class FileDiscoverySystem : ISystem
         bool retryable,
         IComponentStorage storage)
     {
+        var sourceRoot = storage.Query<DirectoryWorkComponent>().Select(storage.GetComponent<DirectoryWorkComponent>)
+            .FirstOrDefault(work => work?.IsRoot == true)?.NormalizedPath;
+        if (sourceRoot != null && Path.IsPathRooted(stableKey) && DirectoryPath.Contains(sourceRoot, stableKey))
+            stableKey = Relative(sourceRoot, stableKey);
         var issue = storage.GetComponent<BackupIssueComponent>(entity);
         var now = DateTimeOffset.UtcNow;
         if (issue == null)
@@ -456,15 +462,13 @@ public sealed class FileDiscoverySystem : ISystem
 
     private static string Normalize(string path)
     {
-        var full = Path.GetFullPath(path);
-        var root = Path.GetPathRoot(full);
-        return string.Equals(full, root, StringComparison.OrdinalIgnoreCase)
-            ? full
-            : full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return DirectoryPath.Normalize(path);
     }
 
+    private static string Relative(string root, string path) => Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
+
     private static bool PathsEqual(string left, string right) =>
-        string.Equals(Normalize(left), Normalize(right), StringComparison.OrdinalIgnoreCase);
+        string.Equals(Normalize(left), Normalize(right), StringComparison.Ordinal);
 
     private sealed class DiscoveryContext
     {
@@ -484,18 +488,18 @@ public sealed class FileDiscoverySystem : ISystem
             Pass = pass;
             SourceDirectory = sourceDirectory;
             Storage = storage;
-            FileEntities = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
-            DirectoryEntities = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
-            IssueEntities = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
+            FileEntities = new Dictionary<string, Entity>(StringComparer.Ordinal);
+            DirectoryEntities = new Dictionary<string, Entity>(StringComparer.Ordinal);
+            IssueEntities = new Dictionary<string, Entity>(StringComparer.Ordinal);
             PendingDirectories = new Queue<Entity>();
-            QueuedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            QueuedDirectories = new HashSet<string>(StringComparer.Ordinal);
 
             foreach (var entity in storage.Query<FileWorkComponent>())
             {
                 var component = storage.GetComponent<FileWorkComponent>(entity);
                 if (component != null && component.RunId == runId)
                 {
-                    FileEntities[Normalize(component.StableKey)] = entity;
+                    FileEntities[Normalize(component.SourcePath)] = entity;
                 }
             }
 
@@ -504,7 +508,7 @@ public sealed class FileDiscoverySystem : ISystem
                 var component = storage.GetComponent<DirectoryWorkComponent>(entity);
                 if (component != null && component.RunId == runId)
                 {
-                    DirectoryEntities[Normalize(component.StableKey)] = entity;
+                    DirectoryEntities[Normalize(component.NormalizedPath)] = entity;
                 }
             }
 
@@ -513,7 +517,7 @@ public sealed class FileDiscoverySystem : ISystem
                 var component = storage.GetComponent<BackupIssueComponent>(entity);
                 if (component != null && component.RunId == runId)
                 {
-                    IssueEntities[Normalize(component.StableKey)] = entity;
+                    IssueEntities[Normalize(component.Path)] = entity;
                 }
             }
         }
