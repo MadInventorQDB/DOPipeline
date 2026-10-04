@@ -4,7 +4,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using DifferentialBackup.Components;
+using DifferentialBackup.Systems;
 using DifferentialBackup.Utilities;
+using DOPipeline.Entities;
+using DOPipeline.Storage;
 
 namespace DifferentialBackup.Test.Utilities;
 
@@ -55,6 +58,33 @@ public sealed class DestinationStateStoreTests : IDisposable
         var other = Path.Combine(_root, "other-source");
         Directory.CreateDirectory(other);
         Assert.Empty(new DestinationStateStore(other, Destination).LoadHashes());
+    }
+
+    [Fact]
+    public void CompletedLegacyJournalStillCommitsDestinationEvidence()
+    {
+        var run = Published(new DateTime(2026, 1, 1), "legacy publication");
+        var path = Path.Combine(Destination, "20260101000000.backup", "manifest.json");
+        var manifest = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(path))!;
+        manifest.FormatVersion = 3;
+        manifest.RunId = Guid.Empty;
+        File.WriteAllText(path, JsonSerializer.Serialize(manifest));
+        run.MarkPublished();
+        run.SaveStateCommitStep(StateCommitStep.Complete);
+        run.DestinationState = new DestinationStateStore(Source, Destination);
+        var op = new Entity();
+        var world = new ComponentStorage();
+        world.SetComponent(op, new OperationComponent { RunId = run.RunId, SourceDirectory = Source,
+            BackupDestination = Destination, Phase = OperationPhase.InitialPass });
+        var hashes = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+        var dates = new HashSet<DateTime>();
+        var recovered = new BackupRecoverySystem(hashes, dates, run).Execute(new[] { op }, world);
+        Assert.True(recovered.IsSuccess, recovered.ErrorMessage);
+        Assert.Equal(StateCommitStep.Complete, world.GetComponent<StateCommitComponent>(op)!.Step);
+        var result = new BackupStateCommitSystem(hashes, dates, run).Execute(new[] { op }, world);
+        Assert.True(result.IsSuccess, result.ErrorMessage);
+        Assert.True(DestinationStateStore.HasCommit(Destination, run.RunId, Hash(File.ReadAllBytes(path))));
+        Assert.Single(run.DestinationState.LoadHashes());
     }
 
     [Fact]

@@ -80,10 +80,11 @@ Recorded local integration results (2026-10-04):
 
 | Environment | Verified behavior |
 | --- | --- |
-| Windows, .NET 10 | Both Release test projects; junction aliases; native lock failures; interruption recovery; mixed NTFS directory case policies with no overwritten targets |
+| Windows, .NET 10 | Both Release test projects; junction aliases; native lock failures; interruption recovery; case-distinct backup/restore and mixed NTFS directory case policies with no overwritten targets |
 | WSL2 Ubuntu 22.04, native Linux filesystem, .NET 10 | Both Release test projects; symlink aliases; case-distinct round trips; literal backslashes/colons and 255-character names; capacity on the separate `/dev/shm` mount |
 | Real Windows NAS share | Killed after capture through a mapped drive; competing UNC process rejected; resumed through UNC after deleting the source file; original GUID, index bytes, and captured bytes preserved; both tags removed |
+| Hosted macOS 26 ARM64, .NET 10, default APFS and case-sensitive APFS image | Both Release test projects; symlink and root-case aliases; exact case-distinct round trips on the sensitive image; Unicode collision preflight; literal Unix names; interrupted lifecycle recovery |
 
-Hosted macOS results remain pending until the CI matrix passes. The local NAS
+Hosted results are available in the pull request's CI artifacts. The local NAS
 fixture used an isolated GUID directory and removed only its test data. These
 results do not certify every network provider or filesystem policy.

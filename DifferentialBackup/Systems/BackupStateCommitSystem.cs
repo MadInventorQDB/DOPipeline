@@ -74,6 +74,10 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
             if (!_runState.RecoverPublishedState(_fileHashes, _backupDates, applyState: false, completePublication: false))
                 throw new InvalidDataException("Published artifacts have not been validated.");
 
+            // Older journals may already mark the executable's shared state as
+            // saved. They still need evidence in this selected destination.
+            _runState.DestinationState?.EnsureCommitted(_runState);
+
             var mergedHashes = BuildPublishedHashState(operation, publication, storage);
             var commit = storage.GetComponent<StateCommitComponent>(operationEntity)
                 ?? new StateCommitComponent

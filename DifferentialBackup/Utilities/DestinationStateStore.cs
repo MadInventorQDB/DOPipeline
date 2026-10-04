@@ -56,8 +56,12 @@ public sealed class DestinationStateStore
                 // Removing a published set also removes its authority to skip capture.
                 if (!File.Exists(path)) continue;
                 var manifest = AtomicJson.Read<BackupManifest>(path);
-                if (!state.CommittedRuns.TryGetValue(manifest.RunId, out var evidence) ||
-                    !string.Equals(Hash(path), evidence, StringComparison.OrdinalIgnoreCase))
+                var publicationHash = Hash(path);
+                var hasEvidence = manifest.FormatVersion is 2 or 3 && manifest.RunId == Guid.Empty
+                    ? state.CommittedRuns.Values.Any(value => string.Equals(value, publicationHash, StringComparison.OrdinalIgnoreCase))
+                    : state.CommittedRuns.TryGetValue(manifest.RunId, out var evidence) &&
+                        string.Equals(publicationHash, evidence, StringComparison.OrdinalIgnoreCase);
+                if (!hasEvidence)
                     throw new InvalidDataException("Baseline publication evidence is invalid.");
                 var published = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var part in manifest.Parts)
@@ -100,6 +104,13 @@ public sealed class DestinationStateStore
         using var stream = File.OpenRead(Path.Combine(published, "manifest.json"));
         state.CommittedRuns[run.RunId] = Convert.ToHexString(SHA256.HashData(stream));
         AtomicJson.Write(StatePath, state);
+    }
+
+    public void EnsureCommitted(BackupRunState run)
+    {
+        var manifest = run.RecoveredManifest ?? throw new InvalidOperationException("Publication must be validated before state commit.");
+        var path = Path.Combine(_destination, manifest.BackupDate.ToString("yyyyMMddHHmmss") + ".backup", "manifest.json");
+        if (!HasCommit(_destination, run.RunId, Hash(path))) Commit(run);
     }
 
     public static bool HasCommit(string destination, Guid id, string manifestHash)

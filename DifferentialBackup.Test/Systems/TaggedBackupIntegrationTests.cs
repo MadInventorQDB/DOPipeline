@@ -105,7 +105,8 @@ public sealed class TaggedBackupIntegrationTests : IDisposable
             finally { await Kill(first); }
         }
         File.WriteAllText(file, "new source bytes must not be captured");
-        using (var resumed = Child(sourceAlias, destinationAlias))
+        using (var resumed = Child(Path.GetRelativePath(Environment.CurrentDirectory, sourceAlias) + Path.DirectorySeparatorChar,
+            Path.GetRelativePath(Environment.CurrentDirectory, destinationAlias)))
         {
             try
             {
