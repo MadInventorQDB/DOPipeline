@@ -23,11 +23,7 @@ public sealed class ExclusiveOperationLock : IDisposable
         {
             if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
                 throw new IOException("An operation lock anchor must be a regular file.");
-            var stream = new FileStream(
-                path,
-                FileMode.OpenOrCreate,
-                FileAccess.ReadWrite,
-                FileShare.None);
+            var stream = OpenAnchor(path);
             try
             {
                 if (!OperatingSystem.IsWindows() || nativeLock != null)
@@ -56,6 +52,21 @@ public sealed class ExclusiveOperationLock : IDisposable
     {
         var descriptor = checked((int)handle.DangerousGetHandle());
         return OperatingSystem.IsMacOS() ? MacFlock(descriptor, 2 | 4) : UnixFlock(descriptor, 2 | 4);
+    }
+
+    private static FileStream OpenAnchor(string path)
+    {
+        // Windows can signal process exit before pending I/O releases its handles.
+        // Retry only sharing/lock violations for a bounded interval; ownership still
+        // requires the exclusive open, and native unsupported-lock errors never retry.
+        var deadline = Environment.TickCount64 + 1000;
+        while (true)
+        {
+            try { return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException ex) when (OperatingSystem.IsWindows() &&
+                (ex.HResult & 0xffff) is 32 or 33 && Environment.TickCount64 < deadline)
+            { Thread.Sleep(25); }
+        }
     }
 
     [DllImport("libc", EntryPoint = "flock", SetLastError = true)] private static extern int UnixFlock(int descriptor, int operation);

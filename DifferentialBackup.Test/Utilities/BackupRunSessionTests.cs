@@ -137,7 +137,7 @@ public sealed class BackupRunSessionTests : IDisposable
         var recovered = adopted.CreateRunState();
         recovered.BeginRun();
         Assert.Equal(2, recovered.Job!.FormatVersion);
-        Assert.Equal(Path.Combine(Source, "file.txt"), Assert.Single(recovered.LoadPartCheckpoint(1)!.Files).SourcePath);
+        Assert.Equal(Path.Combine(adopted.SourceDirectory, "file.txt"), Assert.Single(recovered.LoadPartCheckpoint(1)!.Files).SourcePath);
     }
 
     [Fact]

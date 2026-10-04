@@ -248,15 +248,29 @@ public sealed class TaggedBackupIntegrationTests : IDisposable
         Assert.Equal(id, JsonSerializer.Deserialize<BackupRunTag>(File.ReadAllText(Path.Combine(Destination, BackupRunSession.TagFileName)))!.RunId);
     }
 
-    [Fact]
+    [CaseDistinctFilesystemFact]
     public void CaseDistinctNamesRoundTripWhenTheFilesystemSupportsThem()
     {
         var probe = Path.Combine(Source, "case-probe");
         File.WriteAllText(probe, "probe");
         var sensitive = !File.Exists(Path.Combine(Source, "CASE-PROBE"));
         File.Delete(probe);
-        Console.WriteLine("CAPABILITY case-distinct-files=" + sensitive);
-        if (!sensitive) return;
+        Assert.True(sensitive);
+        RoundTripCaseDistinctNames();
+    }
+
+    [WindowsCaseSensitiveFact]
+    public void WindowsCaseSensitiveDirectoriesRoundTripExactNames()
+    {
+        Assert.True(WindowsCaseSensitiveFactAttribute.Enable(Source));
+        var restore = Path.Combine(_root, "restore");
+        Directory.CreateDirectory(restore);
+        Assert.True(WindowsCaseSensitiveFactAttribute.Enable(restore));
+        RoundTripCaseDistinctNames();
+    }
+
+    private void RoundTripCaseDistinctNames()
+    {
         Directory.CreateDirectory(Path.Combine(Source, "Folder"));
         Directory.CreateDirectory(Path.Combine(Source, "folder"));
         foreach (var name in new[] { "Folder/File", "Folder/file", "folder/File", "folder/file" })
@@ -291,6 +305,8 @@ public sealed class TaggedBackupIntegrationTests : IDisposable
         var staging = Path.Combine(Path.GetDirectoryName(source)!, "in-process-staging");
         using var session = BackupRunSession.Open(source, destination, staging);
         Assert.False(session.CleanupCompleted);
+        source = session.SourceDirectory;
+        destination = session.BackupDestination;
         var state = session.CreateRunState();
         var store = state.DestinationState!;
         var world = new ComponentStorage();

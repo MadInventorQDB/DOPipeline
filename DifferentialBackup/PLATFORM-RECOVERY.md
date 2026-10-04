@@ -75,3 +75,15 @@ replacement on Unix; tests specifically requiring that behavior record a skip.
 NAS and mapped-drive integration requires a real Windows share and is not
 verified by hosted CI. Record those results before deploying to that provider.
 WSL testing must use its native Linux filesystem, rather than `/mnt/c`.
+
+Recorded local integration results (2026-10-04):
+
+| Environment | Verified behavior |
+| --- | --- |
+| Windows, .NET 10 | Both Release test projects; junction aliases; native lock failures; interruption recovery; mixed NTFS directory case policies with no overwritten targets |
+| WSL2 Ubuntu 22.04, native Linux filesystem, .NET 10 | Both Release test projects; symlink aliases; case-distinct round trips; literal backslashes/colons and 255-character names; capacity on the separate `/dev/shm` mount |
+| Real Windows NAS share | Killed after capture through a mapped drive; competing UNC process rejected; resumed through UNC after deleting the source file; original GUID, index bytes, and captured bytes preserved; both tags removed |
+
+Hosted macOS results remain pending until the CI matrix passes. The local NAS
+fixture used an isolated GUID directory and removed only its test data. These
+results do not certify every network provider or filesystem policy.
