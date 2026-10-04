@@ -68,8 +68,8 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
             }
 
             var descriptors = ReadDescriptors(archives);
-            ValidateDescriptors(descriptors);
             var archiveIdentity = ComputeArchiveIdentity(archives);
+            ValidateDescriptors(descriptors, archiveIdentity);
             var journal = LoadJournal(archiveIdentity);
 
             var existingByEntryIdentity = new Dictionary<string, (Entity Entity, RestoreEntryComponent Entry)>(StringComparer.Ordinal);
@@ -183,7 +183,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
                 entries.Add((restoreEntity, entry, descriptor));
             }
 
-            var entriesByArchive = entries.GroupBy(item => item.Descriptor.ArchivePath, StringComparer.OrdinalIgnoreCase);
+            var entriesByArchive = entries.GroupBy(item => item.Descriptor.ArchivePath, StringComparer.Ordinal);
             foreach (var group in entriesByArchive)
             {
                 using var zip = ZipFile.OpenRead(group.Key);
@@ -292,7 +292,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
             }
 
             var manifest = JsonSerializer.Deserialize<BackupManifest>(File.ReadAllText(manifestPath));
-            if (manifest == null || manifest.FormatVersion is not (2 or 3))
+            if (manifest == null || manifest.FormatVersion is not (2 or 3 or 4))
             {
                 throw new InvalidDataException("Backup manifest format is not supported.");
             }
@@ -303,7 +303,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
                     Path.Combine(backupSetPath, ValidatePartName(part.ArchiveFileName)),
                     part.ArchiveBytes,
                     part.ArchiveSha256,
-                    BackupIndexReader.Read(backupSetPath, part)?.Files))
+                    BackupIndexReader.Read(backupSetPath, part)?.Files, manifest.FormatVersion >= 4))
                 .ToList();
             return new ArchiveSelection(archives, manifest.FormatVersion >= 3 && !manifest.IsComplete);
         }
@@ -334,7 +334,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
 
             using var zip = ZipFile.OpenRead(archive.Path);
             var archiveIdentity = ComputeFileIdentity(archive.Path);
-            var expected = archive.Files?.ToDictionary(file => file.EntryName, StringComparer.OrdinalIgnoreCase);
+            var expected = archive.Files?.ToDictionary(file => file.EntryName, StringComparer.Ordinal);
             if (expected != null && zip.Entries.Count != expected.Count)
                 throw new InvalidDataException("Archive entry count does not match its index.");
             foreach (var entry in zip.Entries)
@@ -342,23 +342,23 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
                 BackupPartFile? file = null;
                 if (expected != null && !expected.TryGetValue(entry.FullName, out file))
                     throw new InvalidDataException("Archive entry is not present in its index.");
-                var target = GetSafeRestorePath(entry.FullName);
+                var target = GetSafeRestorePath(entry.FullName, archive.PortablePaths);
                 descriptors.Add(new ArchiveEntryDescriptor(
                     archive.Path,
                     archiveIdentity + ":" + entry.FullName,
                     entry.FullName,
                     target,
                     file?.Length,
-                    file?.Hash));
+                    file?.Hash, archive.PortablePaths));
             }
         }
 
         return descriptors;
     }
 
-    private void ValidateDescriptors(IReadOnlyList<ArchiveEntryDescriptor> descriptors)
+    private void ValidateDescriptors(IReadOnlyList<ArchiveEntryDescriptor> descriptors, string archiveIdentity)
     {
-        var targets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var targets = new HashSet<string>(StringComparer.Ordinal);
         foreach (var descriptor in descriptors)
         {
             if (!targets.Add(descriptor.TargetPath))
@@ -366,6 +366,8 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
                 throw new InvalidDataException($"Backup contains duplicate restore target: '{descriptor.EntryName}'.");
             }
         }
+        RestoreNamePreflight.Validate(_restoreDestination, descriptors.Select(item => (item.TargetPath, item.EntryName.EndsWith('/'))),
+            $"restore-{archiveIdentity[..Math.Min(16, archiveIdentity.Length)]}.report.json");
     }
 
     private void RestoreEntry(
@@ -377,7 +379,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
     {
         // Revalidate immediately before mutation in case a target ancestor was
         // replaced with a reparse point after the initial manifest scan.
-        _ = GetSafeRestorePath(descriptor.EntryName);
+        _ = GetSafeRestorePath(descriptor.EntryName, descriptor.PortablePaths);
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(descriptor.TargetPath)!);
@@ -390,7 +392,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
         {
             throw new RestoreTargetException(descriptor.TargetPath, ex);
         }
-        var temporaryPath = descriptor.TargetPath + ".differential-restore-" + Guid.NewGuid().ToString("N") + ".tmp";
+        var temporaryPath = Path.Combine(Path.GetDirectoryName(descriptor.TargetPath)!, ".db-restore-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
             var entry = zip.GetEntry(descriptor.EntryName)
@@ -461,6 +463,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
 
             try
             {
+                _ = GetSafeRestorePath(descriptor.EntryName, descriptor.PortablePaths);
                 File.Move(temporaryPath, descriptor.TargetPath, true);
             }
             catch (IOException ex)
@@ -490,47 +493,11 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
         }
     }
 
-    private string GetSafeRestorePath(string entryName)
+    private string GetSafeRestorePath(string entryName, bool portable = false)
     {
-        if (string.IsNullOrWhiteSpace(entryName) ||
-            Path.IsPathRooted(entryName) ||
-            entryName.Contains(':', StringComparison.Ordinal) ||
-            entryName.Contains('\0'))
-        {
-            throw new InvalidDataException($"Backup entry contains an unsafe path: '{entryName}'.");
-        }
-
-        var restoreRoot = _restoreDestination.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        var destination = Path.GetFullPath(_restoreDestination).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var relativePath = entryName.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
-        var restorePath = Path.GetFullPath(Path.Combine(restoreRoot, relativePath));
-        if (!restorePath.StartsWith(restoreRoot, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException($"Backup entry escapes the restore directory: '{entryName}'.");
-        }
-
-        var current = Path.GetDirectoryName(restorePath);
-        while (!string.IsNullOrWhiteSpace(current))
-        {
-            if (Directory.Exists(current) && (File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new InvalidDataException($"Backup target ancestor is a reparse point: '{current}'.");
-            }
-
-            if (string.Equals(current, destination, StringComparison.OrdinalIgnoreCase))
-            {
-                break;
-            }
-
-            if (!current.StartsWith(restoreRoot, StringComparison.OrdinalIgnoreCase))
-            {
-                break;
-            }
-
-            current = Path.GetDirectoryName(current);
-        }
-
-        return restorePath;
+        var path = ArchivePath.ToAccessPath(_restoreDestination, entryName, portable);
+        RestoreNamePreflight.RejectLinks(_restoreDestination, path);
+        return path;
     }
 
     private RestoreJournal LoadJournal(string archiveIdentity) =>
@@ -648,7 +615,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
     }
 
     private sealed record ArchiveDescriptor(string Path, long ExpectedLength, string? ExpectedHash,
-        IReadOnlyList<BackupPartFile>? Files = null);
+        IReadOnlyList<BackupPartFile>? Files = null, bool PortablePaths = false);
 
     private sealed record ArchiveSelection(IReadOnlyList<ArchiveDescriptor> Archives, bool IsIncomplete);
 
@@ -658,7 +625,7 @@ public sealed class RestoreSystem : ISystem, ICancellableSystem
         string EntryName,
         string TargetPath,
         long? ExpectedLength,
-        string? ExpectedHash);
+        string? ExpectedHash, bool PortablePaths);
 
     private sealed class RestoreTargetException : IOException
     {

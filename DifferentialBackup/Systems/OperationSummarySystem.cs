@@ -90,11 +90,11 @@ public sealed class OperationSummarySystem : IEntitySetSystem
             .ToList();
         var unresolved = issues
             .Where(issue => !issue.Resolved)
-            .GroupBy(issue => issue.StableKey, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(issue => issue.StableKey, StringComparer.Ordinal)
             .Count();
         var resolved = issues
             .Where(issue => issue.Resolved)
-            .GroupBy(issue => issue.StableKey, StringComparer.OrdinalIgnoreCase)
+            .GroupBy(issue => issue.StableKey, StringComparer.Ordinal)
             .Count();
         var hasPublishedContent = storage.Query<BackupRunComponent>()
             .Select(storage.GetComponent<BackupRunComponent>)

@@ -85,12 +85,12 @@ namespace DifferentialBackup.Systems
                 .Where(issue => issue != null && !issue.Resolved &&
                     (operation == null || issue.RunId == operation.RunId))
                 .Cast<BackupIssueComponent>()
-                .GroupBy(issue => issue.StableKey, StringComparer.OrdinalIgnoreCase)
+                .GroupBy(issue => issue.StableKey, StringComparer.Ordinal)
                 .Select(group => group.OrderByDescending(issue => issue.LastOccurrenceUtc).First())
                 .ToList();
             var issueKeys = operationIssues
                 .Select(issue => issue.StableKey)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                .ToHashSet(StringComparer.Ordinal);
             foreach (var entity in storage.Query<FileWorkComponent>())
             {
                 var work = storage.GetComponent<FileWorkComponent>(entity);
@@ -188,7 +188,7 @@ namespace DifferentialBackup.Systems
                     }
                 }
 
-                var entryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var entryNames = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var item in activeParts)
                 {
                     foreach (var file in item.Part.Files)
@@ -219,7 +219,8 @@ namespace DifferentialBackup.Systems
 
                     var manifest = new BackupManifest
                     {
-                        SourceDirectory = run.SourceDirectory,
+                        RunId = operation?.RunId ?? _runState.RunId,
+                        SourceDirectory = _runState.Job?.SourceDirectory ?? run.SourceDirectory,
                         BackupDate = run.BackupDate,
                         PlanFingerprint = run.PlanFingerprint,
                         FileCount = activeParts.Sum(item => item.Part.Files.Count),
@@ -228,7 +229,8 @@ namespace DifferentialBackup.Systems
                         UnresolvedIssueCount = operationIssues.Count,
                         Issues = operationIssues.Select(issue => new BackupManifestIssue
                         {
-                            Path = issue.Path,
+                            Path = _runState.RelativeSourcePath(issue.Path),
+                            OriginalPath = issue.Path,
                             Stage = issue.Stage,
                             Category = issue.Category,
                             ErrorType = issue.ExceptionType,

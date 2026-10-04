@@ -401,7 +401,7 @@ public sealed partial class BackupRecoveryRegressionTests
         Assert.Equal("DOC_TWO_CONTENT", File.ReadAllText(restoredDoc2));
     }
 
-    [Fact]
+    [DifferentialBackup.Test.Helpers.OpenHandleBlocksReplacementFact]
     public async Task KilledRestoreProcessDuringRetryWaitRecoversAndFinishes()
     {
         var p = RepairPaths();
@@ -458,7 +458,7 @@ public sealed partial class BackupRecoveryRegressionTests
         Assert.Equal("DOC_TWO_CONTENT", File.ReadAllText(restoredDoc2));
     }
 
-    [Fact]
+    [DifferentialBackup.Test.Helpers.OpenHandleBlocksReplacementFact]
     public async Task KilledRestoreProcessDuringInterruptedRetryRoundRecoversAndFinishes()
     {
         var p = RepairPaths();

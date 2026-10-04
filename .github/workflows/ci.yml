@@ -1,0 +1,57 @@
+name: Cross-platform tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  tests:
+    name: ${{ matrix.os }} / ${{ matrix.filesystem }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            filesystem: native
+          - os: ubuntu-latest
+            filesystem: native
+          - os: macos-latest
+            filesystem: native
+          - os: macos-latest
+            filesystem: case-sensitive-apfs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Select a separate Linux capacity mount
+        if: runner.os == 'Linux'
+        shell: bash
+        run: echo "DIFFERENTIALBACKUP_TEST_CAPACITY_ROOT=/dev/shm" >> "$GITHUB_ENV"
+      - name: Create case-sensitive APFS test volume
+        if: matrix.filesystem == 'case-sensitive-apfs'
+        shell: bash
+        run: |
+          hdiutil create -size 2g -fs "Case-sensitive APFS" -volname BackupCaseTests "$RUNNER_TEMP/backup-tests.dmg"
+          hdiutil attach "$RUNNER_TEMP/backup-tests.dmg" -mountpoint "$RUNNER_TEMP/backup-case-tests"
+          mkdir "$RUNNER_TEMP/backup-case-tests/tmp"
+          echo "TMPDIR=$RUNNER_TEMP/backup-case-tests/tmp/" >> "$GITHUB_ENV"
+          echo "DIFFERENTIALBACKUP_TEST_CAPACITY_ROOT=$RUNNER_TEMP/backup-case-tests" >> "$GITHUB_ENV"
+      - name: Test both projects
+        run: dotnet test DOPipeline.sln --configuration Release --disable-build-servers --logger "trx;LogFilePrefix=platform" --logger "console;verbosity=normal"
+      - name: Save results and capability skips
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.filesystem }}
+          path: "**/TestResults/*.trx"
+      - name: Detach APFS volume
+        if: always() && matrix.filesystem == 'case-sensitive-apfs'
+        shell: bash
+        run: |
+          echo "TMPDIR=$RUNNER_TEMP/" >> "$GITHUB_ENV"
+          TMPDIR="$RUNNER_TEMP/" dotnet build-server shutdown
+          TMPDIR="$RUNNER_TEMP/" hdiutil detach -force "$RUNNER_TEMP/backup-case-tests"

@@ -284,6 +284,10 @@ DOPipeline/
 
 ## Testing
 
+See [backup platform and recovery behavior](DifferentialBackup/PLATFORM-RECOVERY.md)
+for temporary run tags, writable-root requirements, destination-scoped baselines,
+compatibility, and platform verification requirements.
+
 Both DOPipeline and DifferentialBackup include comprehensive unit tests to ensure reliability and correctness.
 
 ### Running Tests

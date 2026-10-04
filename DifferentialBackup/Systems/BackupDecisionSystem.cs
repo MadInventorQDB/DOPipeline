@@ -100,6 +100,13 @@ namespace DifferentialBackup.Systems
         public Result Execute(Entity entity, IComponentStorage storage)
         {
             var fileWork = storage.GetComponent<FileWorkComponent>(entity);
+            // Directory identity comes from discovery, even when the directory
+            // has since disappeared. Its issues remain owned by the retry systems.
+            if (fileWork == null && storage.GetComponent<DirectoryWorkComponent>(entity) != null)
+            {
+                return Result.Success();
+            }
+
             OperationComponent? operation;
 
             if (_isExecutionScoped)
@@ -165,7 +172,7 @@ namespace DifferentialBackup.Systems
                     : Result.Fail("Required components missing.");
             }
 
-            if (fileHashComponent.PreviousHash != fileHashComponent.CurrentHash)
+            if (!string.Equals(fileHashComponent.PreviousHash, fileHashComponent.CurrentHash, StringComparison.OrdinalIgnoreCase))
             {
                 // Mark the entity for backup by adding a BackupDateComponent
                 var backupDate = GetBackupDateForCurrentExecution(entity, storage);

@@ -16,25 +16,29 @@ namespace DifferentialBackup.Utilities
         private readonly string _stagingDirectory;
         private readonly ICheckpointObserver _checkpointObserver;
         private long _journalSequence;
+        private readonly BackupInitialization? _identity;
+        public DestinationStateStore? DestinationState { get; set; }
 
         public BackupRunState(
             string sourceDirectory,
             string backupDestination,
             string? stagingRoot = null,
-            ICheckpointObserver? checkpointObserver = null)
+            ICheckpointObserver? checkpointObserver = null,
+            BackupInitialization? identity = null)
         {
+            _identity = identity;
             _sourceDirectory = NormalizeDirectory(sourceDirectory);
             _backupDestination = NormalizeDirectory(backupDestination);
             _stagingRoot = NormalizeDirectory(stagingRoot ?? GetDefaultStagingRoot());
             _stagingDirectory = Path.Combine(
                 _stagingRoot,
-                CreateStableDirectoryName(_sourceDirectory, _backupDestination));
+                identity?.RunId.ToString("N") ?? CreateStableDirectoryName(_sourceDirectory, _backupDestination));
             _checkpointObserver = checkpointObserver ?? NoOpCheckpointObserver.Instance;
         }
 
         public BackupJobState? Job { get; private set; }
 
-        public Guid RunId => Job?.RunId ?? Guid.Empty;
+        public Guid RunId => Job?.RunId is { } id && id != Guid.Empty ? id : _identity?.RunId ?? Guid.Empty;
 
         public DateTime? BackupDate { get; private set; }
 
@@ -75,6 +79,13 @@ namespace DifferentialBackup.Utilities
                     return;
                 }
 
+                if (_identity != null && !File.Exists(JobPath) && !File.Exists(JournalPath))
+                {
+                    if (_identity.HasJob) throw new InvalidDataException("The unfinished run's job and journal are missing.");
+                    if (Directory.EnumerateFileSystemEntries(_stagingDirectory).Any())
+                        throw new InvalidDataException("Staging artifacts exist without their job and journal; they were preserved.");
+                    return;
+                }
                 Job = LoadJob();
                 var journal = LoadAndValidateJournal();
                 ReplayJournal(journal);
@@ -117,7 +128,7 @@ namespace DifferentialBackup.Utilities
                 var receipt = LoadPublicationReceipt();
                 if (receipt != null)
                 {
-                    if (receipt.FormatVersion != BackupJobState.CurrentFormatVersion ||
+                    if (receipt.FormatVersion is not (2 or 3) ||
                         (receipt.RunId != Guid.Empty && Job.RunId != Guid.Empty &&
                          receipt.RunId != Job.RunId) ||
                         receipt.BackupDate != Job.BackupDate ||
@@ -162,9 +173,9 @@ namespace DifferentialBackup.Utilities
 
                 RecoveredManifest = manifest;
 
-                if (manifest.FormatVersion is not (2 or 3) ||
+                if (manifest.FormatVersion is not (2 or 3 or 4) ||
                     manifest.BackupDate != Job.BackupDate ||
-                    !PathsEqual(manifest.SourceDirectory, _sourceDirectory) ||
+                    !(manifest.FormatVersion >= 4 ? manifest.RunId == RunId : MatchesSource(manifest.SourceDirectory)) ||
                     manifest.Parts == null ||
                     manifest.Parts.Select(part => part.PartNumber).Distinct().Count() != manifest.Parts.Count ||
                     manifest.FileCount != manifest.Parts.Sum(part => part.FileCount) ||
@@ -211,7 +222,7 @@ namespace DifferentialBackup.Utilities
                     }
                 }
 
-                var publishedEntryNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var publishedEntryNames = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var manifestPart in manifest.Parts)
                 {
                     var publishedIndex = BackupIndexReader.Read(publishedDirectory, manifestPart);
@@ -237,7 +248,7 @@ namespace DifferentialBackup.Utilities
                             $"Published backup part checksum is invalid: '{archivePath}'.");
                     }
 
-                    if (manifest.FormatVersion is 2 or 3)
+                    if (manifest.FormatVersion is 2 or 3 or 4)
                     {
                         using var archive = ZipFile.OpenRead(archivePath);
                         if (archive.Entries.Count != manifestPart.FileCount)
@@ -260,7 +271,7 @@ namespace DifferentialBackup.Utilities
                     if (checkpoint != null && !string.IsNullOrEmpty(checkpoint.ArchiveSha256) &&
                         !string.Equals(checkpoint.ArchiveSha256, ComputeFileHash(archivePath), StringComparison.OrdinalIgnoreCase))
                         throw new InvalidDataException($"Published backup does not match its acknowledged checkpoint: '{archivePath}'.");
-                    if (manifest.FormatVersion == BackupManifest.CurrentFormatVersion &&
+                    if (manifest.FormatVersion >= 3 &&
                         (checkpoint == null ||
                         checkpoint.Files == null ||
                         checkpoint.Files.Count != checkpoint.FileCount ||
@@ -289,7 +300,7 @@ namespace DifferentialBackup.Utilities
                 }
 
                 if (completePublication &&
-                    string.Equals(publishedDirectory, workingDirectory, StringComparison.OrdinalIgnoreCase))
+                    string.Equals(publishedDirectory, workingDirectory, StringComparison.Ordinal))
                 {
                     if (Directory.Exists(finalDirectory))
                     {
@@ -324,7 +335,7 @@ namespace DifferentialBackup.Utilities
 
                         foreach (var file in checkpoint.Files)
                         {
-                            fileHashes[file.SourcePath] = file.Hash;
+                            fileHashes[ResolveSourcePath(file.SourcePath)] = file.Hash;
                         }
                     }
 
@@ -396,10 +407,10 @@ namespace DifferentialBackup.Utilities
 
                 Job ??= new BackupJobState
                 {
-                    SourceDirectory = _sourceDirectory,
-                    BackupDestination = _backupDestination,
+                    SourceDirectory = _identity?.SourceDirectory ?? _sourceDirectory,
+                    BackupDestination = _identity?.BackupDestination ?? _backupDestination,
                     BackupDate = TruncateToSecond(backupDate),
-                    RunId = runId
+                    RunId = _identity?.RunId ?? runId
                 };
 
                 if (Job.RunId == Guid.Empty && runId != Guid.Empty)
@@ -421,6 +432,12 @@ namespace DifferentialBackup.Utilities
                 // numbers.
                 BackupDate = Job.BackupDate;
                 AppendJournalRecord("job-updated", Job);
+                if (_identity != null && !_identity.HasJob)
+                {
+                    _identity.HasJob = true;
+                    AtomicJson.Write(Path.Combine(_stagingRoot, "initializations", _identity.RunId.ToString("N") + ".json"), _identity);
+                    _checkpointObserver.Reached("tag-job-initialized");
+                }
 
                 return Job;
             }
@@ -440,13 +457,14 @@ namespace DifferentialBackup.Utilities
 
                     var checkpoint = JsonSerializer.Deserialize<BackupPartCheckpoint>(File.ReadAllText(path));
                     if (checkpoint == null ||
-                        checkpoint.FormatVersion != BackupJobState.CurrentFormatVersion ||
+                        checkpoint.FormatVersion is not (2 or 3) ||
                         checkpoint.PartNumber != partNumber)
                     {
                         throw new InvalidDataException(
                             $"Backup part checkpoint does not match part {partNumber}: '{path}'.");
                     }
 
+                    checkpoint.Files = AccessFiles(checkpoint.Files);
                     return checkpoint;
                 }
                 catch (JsonException ex)
@@ -471,7 +489,7 @@ namespace DifferentialBackup.Utilities
                 {
                     var plan = JsonSerializer.Deserialize<BackupPartPlan>(File.ReadAllText(path));
                     if (plan == null ||
-                        plan.FormatVersion != BackupJobState.CurrentFormatVersion ||
+                        plan.FormatVersion is not (2 or 3) ||
                         plan.PartNumber != partNumber ||
                         (Job?.RunId is { } jobRunId && jobRunId != Guid.Empty &&
                          plan.RunId != Guid.Empty && plan.RunId != jobRunId))
@@ -480,6 +498,7 @@ namespace DifferentialBackup.Utilities
                             $"Backup part plan does not match part {partNumber}: '{path}'.");
                     }
 
+                    plan.Files = AccessFiles(plan.Files);
                     return plan;
                 }
                 catch (JsonException ex)
@@ -495,7 +514,9 @@ namespace DifferentialBackup.Utilities
             lock (_lock)
             {
                 Directory.CreateDirectory(_stagingDirectory);
-                AppendJournalRecord("part-plan", plan);
+                var saved = JsonSerializer.Deserialize<BackupPartPlan>(JsonSerializer.Serialize(plan))!;
+                saved.Files = PersistedFiles(plan.Files, saved.FormatVersion);
+                AppendJournalRecord("part-plan", saved);
                 _checkpointObserver.Reached("part-plan-committed");
             }
         }
@@ -505,7 +526,9 @@ namespace DifferentialBackup.Utilities
             lock (_lock)
             {
                 Directory.CreateDirectory(_stagingDirectory);
-                AppendJournalRecord("part-checkpoint", checkpoint);
+                var saved = JsonSerializer.Deserialize<BackupPartCheckpoint>(JsonSerializer.Serialize(checkpoint))!;
+                saved.Files = PersistedFiles(checkpoint.Files, saved.FormatVersion);
+                AppendJournalRecord("part-checkpoint", saved);
                 _checkpointObserver.Reached("part-checkpoint-committed");
             }
         }
@@ -586,9 +609,15 @@ namespace DifferentialBackup.Utilities
 
                 try
                 {
-                    return JsonSerializer.Deserialize<PublicationReceiptState>(
-                        File.ReadAllText(PublicationReceiptPath))
+                    var receipt = JsonSerializer.Deserialize<PublicationReceiptState>(File.ReadAllText(PublicationReceiptPath))
                         ?? throw new InvalidDataException("Publication receipt is empty.");
+                    if (_identity != null)
+                    {
+                        if (receipt.RunId != Guid.Empty && receipt.RunId != RunId) throw new InvalidDataException("Receipt run identity differs.");
+                    }
+                    receipt.FinalDirectory = RebaseDestination(receipt.FinalDirectory);
+                    receipt.WorkingDirectory = RebaseDestination(receipt.WorkingDirectory);
+                    return receipt;
                 }
                 catch (JsonException ex)
                 {
@@ -603,7 +632,13 @@ namespace DifferentialBackup.Utilities
             lock (_lock)
             {
                 Directory.CreateDirectory(_stagingDirectory);
-                AppendJournalRecord("publication-receipt", receipt);
+                var saved = JsonSerializer.Deserialize<PublicationReceiptState>(JsonSerializer.Serialize(receipt))!;
+                if (saved.FormatVersion >= 3)
+                {
+                    saved.FinalDirectory = Path.GetRelativePath(_backupDestination, receipt.FinalDirectory).Replace(Path.DirectorySeparatorChar, '/');
+                    saved.WorkingDirectory = Path.GetRelativePath(_backupDestination, receipt.WorkingDirectory).Replace(Path.DirectorySeparatorChar, '/');
+                }
+                AppendJournalRecord("publication-receipt", saved);
                 _checkpointObserver.Reached("publication-receipt-committed");
             }
         }
@@ -671,7 +706,9 @@ namespace DifferentialBackup.Utilities
             {
                 AppendJournalRecord("part-transferred", new
                 {
-                    PartNumber = number, ArchivePath = archivePath, IndexPath = indexPath,
+                    PartNumber = number,
+                    ArchivePath = Job?.FormatVersion >= 3 ? Path.GetRelativePath(_backupDestination, archivePath).Replace(Path.DirectorySeparatorChar, '/') : archivePath,
+                    IndexPath = Job?.FormatVersion >= 3 ? Path.GetRelativePath(_backupDestination, indexPath).Replace(Path.DirectorySeparatorChar, '/') : indexPath,
                     ArchiveSha256 = ComputeFileHash(archivePath), IndexSha256 = ComputeFileHash(indexPath)
                 });
             }
@@ -688,9 +725,10 @@ namespace DifferentialBackup.Utilities
             {
                 var job = JsonSerializer.Deserialize<BackupJobState>(File.ReadAllText(JobPath));
                 if (job == null ||
-                    job.FormatVersion != BackupJobState.CurrentFormatVersion ||
-                    !PathsEqual(job.SourceDirectory, _sourceDirectory) ||
-                    !PathsEqual(job.BackupDestination, _backupDestination))
+                    job.FormatVersion is not (2 or 3) ||
+                    !MatchesSource(job.SourceDirectory) ||
+                    !MatchesDestination(job.BackupDestination) ||
+                    (_identity != null && job.RunId != Guid.Empty && job.RunId != _identity.RunId))
                 {
                     throw new InvalidDataException("Backup job format or identity is not supported; state was preserved.");
                 }
@@ -738,13 +776,14 @@ namespace DifferentialBackup.Utilities
                 return true;
             }
 
-            if (name.StartsWith("job.json.", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("publication.receipt.json.", StringComparison.OrdinalIgnoreCase))
+            if (AtomicJson.IsTemporaryName(name, "job.json") ||
+                AtomicJson.IsTemporaryName(name, "manifest.json") ||
+                AtomicJson.IsTemporaryName(name, "publication.receipt.json"))
             {
                 return true;
             }
 
-            if (!name.StartsWith("part-", StringComparison.OrdinalIgnoreCase) ||
+            if (!name.StartsWith("part-", StringComparison.Ordinal) ||
                 name.Length < 11)
             {
                 return false;
@@ -757,14 +796,15 @@ namespace DifferentialBackup.Utilities
             }
 
             var suffix = name.Substring(11);
-            return suffix.Equals(".zip", StringComparison.OrdinalIgnoreCase) ||
-                suffix.Equals(".zip.partial", StringComparison.OrdinalIgnoreCase) ||
-                suffix.Equals(".zip.copying", StringComparison.OrdinalIgnoreCase) ||
-                suffix.Equals(".index.json", StringComparison.OrdinalIgnoreCase) ||
-                suffix.Equals(".plan.json", StringComparison.OrdinalIgnoreCase) ||
-                suffix.Equals(".transfer.json", StringComparison.OrdinalIgnoreCase) ||
-                suffix.StartsWith(".index.json.", StringComparison.OrdinalIgnoreCase) ||
-                suffix.StartsWith(".plan.json.", StringComparison.OrdinalIgnoreCase);
+            return suffix.Equals(".zip", StringComparison.Ordinal) ||
+                suffix.Equals(".zip.partial", StringComparison.Ordinal) ||
+                suffix.Equals(".zip.copying", StringComparison.Ordinal) ||
+                suffix.Equals(".index.json", StringComparison.Ordinal) ||
+                suffix.Equals(".plan.json", StringComparison.Ordinal) ||
+                suffix.Equals(".transfer.json", StringComparison.Ordinal) ||
+                AtomicJson.IsTemporaryName(name, name[..11] + ".index.json") ||
+                AtomicJson.IsTemporaryName(name, name[..11] + ".plan.json") ||
+                AtomicJson.IsTemporaryName(name, name[..11] + ".transfer.json");
         }
 
         private List<BackupJournalRecord> LoadAndValidateJournal()
@@ -855,7 +895,7 @@ namespace DifferentialBackup.Utilities
             var record = new BackupJournalRecord
             {
                 Sequence = ++_journalSequence,
-                RunId = Job?.RunId ?? Guid.Empty,
+                RunId = Job?.RunId ?? _identity?.RunId ?? Guid.Empty,
                 ChangeType = changeType,
                 PayloadJson = JsonSerializer.Serialize(payload)
             };
@@ -934,10 +974,11 @@ namespace DifferentialBackup.Utilities
                     case "job-updated":
                     case "publication-pending":
                         var job = payload.Deserialize<BackupJobState>() ?? throw new InvalidDataException("Null job record.");
-                        if (job.FormatVersion != BackupJobState.CurrentFormatVersion ||
-                            !PathsEqual(job.SourceDirectory, _sourceDirectory) ||
-                            !PathsEqual(job.BackupDestination, _backupDestination) ||
-                            (record.RunId != Guid.Empty && job.RunId != record.RunId))
+                        if (job.FormatVersion is not (2 or 3) ||
+                            !MatchesSource(job.SourceDirectory) ||
+                            !MatchesDestination(job.BackupDestination) ||
+                            (record.RunId != Guid.Empty && job.RunId != record.RunId) ||
+                            (_identity != null && job.RunId != Guid.Empty && job.RunId != _identity.RunId))
                             throw new InvalidDataException("Journal job identity is inconsistent.");
                         Job = job;
                         SetView(JobPath, JsonSerializer.Serialize(Job), views, recognized);
@@ -1053,11 +1094,7 @@ namespace DifferentialBackup.Utilities
 
         private static string NormalizeDirectory(string path)
         {
-            var fullPath = Path.GetFullPath(path);
-            var root = Path.GetPathRoot(fullPath);
-            return string.Equals(fullPath, root, StringComparison.OrdinalIgnoreCase)
-                ? fullPath
-                : fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return DirectoryPath.Normalize(path);
         }
 
         private static bool PathsEqual(string left, string right)
@@ -1067,8 +1104,42 @@ namespace DifferentialBackup.Utilities
                 return false;
             }
 
-            return string.Equals(NormalizeDirectory(left), NormalizeDirectory(right), StringComparison.OrdinalIgnoreCase);
+            return string.Equals(NormalizeDirectory(left), NormalizeDirectory(right), StringComparison.Ordinal);
         }
+
+        private bool MatchesSource(string path) => PathsEqual(path, _sourceDirectory) ||
+            (_identity != null && PathsEqual(path, _identity.SourceDirectory));
+        private bool MatchesDestination(string path) => PathsEqual(path, _backupDestination) ||
+            (_identity != null && PathsEqual(path, _identity.BackupDestination));
+
+        public string ResolveSourcePath(string path)
+        {
+            if (path == ".") return _sourceDirectory;
+            if (!Path.IsPathRooted(path)) return ArchivePath.ToAccessPath(_sourceDirectory, path, portable: true);
+            var original = _identity?.SourceDirectory ?? Job?.SourceDirectory ?? _sourceDirectory;
+            if (!DirectoryPath.Contains(original, path))
+                throw new InvalidDataException($"File path is outside the recorded source: '{path}'.");
+            return DirectoryPath.FromRelative(_sourceDirectory, Path.GetRelativePath(original, path));
+        }
+
+        public string RelativeSourcePath(string path) =>
+            Path.GetRelativePath(_sourceDirectory, path).Replace(Path.DirectorySeparatorChar, '/');
+
+        private string RebaseDestination(string path)
+        {
+            if (!Path.IsPathRooted(path)) return DirectoryPath.FromRelative(_backupDestination, path);
+            foreach (var original in new[] { _identity?.BackupDestination, _identity?.CanonicalDestination, _backupDestination })
+                if (original != null && DirectoryPath.Contains(original, path))
+                    return DirectoryPath.FromRelative(_backupDestination, Path.GetRelativePath(original, path));
+            throw new InvalidDataException("Receipt path is outside its destination.");
+        }
+
+        private List<BackupPartFile> AccessFiles(IEnumerable<BackupPartFile> files) => files.Select(file =>
+            new BackupPartFile(ResolveSourcePath(file.SourcePath), file.EntryName, file.Hash, file.Length)).ToList();
+
+        private List<BackupPartFile> PersistedFiles(IEnumerable<BackupPartFile> files, int format) => files.Select(file =>
+            new BackupPartFile(format >= 3 ? RelativeSourcePath(file.SourcePath) : file.SourcePath,
+                file.EntryName, file.Hash, file.Length)).ToList();
 
         private static string GetDefaultStagingRoot()
         {
@@ -1085,7 +1156,7 @@ namespace DifferentialBackup.Utilities
 
     public sealed class BackupJobState
     {
-        public const int CurrentFormatVersion = 2;
+        public const int CurrentFormatVersion = 3;
 
         public int FormatVersion { get; set; } = CurrentFormatVersion;
 

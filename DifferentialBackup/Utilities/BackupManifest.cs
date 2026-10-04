@@ -5,7 +5,9 @@ namespace DifferentialBackup.Utilities
 {
     public class BackupManifest
     {
-        public const int CurrentFormatVersion = 3;
+        public const int CurrentFormatVersion = 4;
+
+        public Guid RunId { get; set; }
 
         public int FormatVersion { get; set; } = CurrentFormatVersion;
 
@@ -51,6 +53,7 @@ namespace DifferentialBackup.Utilities
     public class BackupManifestIssue
     {
         public string Path { get; set; } = string.Empty;
+        public string? OriginalPath { get; set; }
         public string Stage { get; set; } = string.Empty;
         public string Category { get; set; } = string.Empty;
         public string? ErrorType { get; set; }

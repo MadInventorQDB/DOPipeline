@@ -98,7 +98,7 @@ namespace DifferentialBackup.Systems
                 var existingFiles = existingPartEntities
                     .SelectMany(item => item.Part.Files)
                     .Select(file => file.SourcePath)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    .ToHashSet(StringComparer.Ordinal);
                 files = files
                     .Where(file => !existingFiles.Contains(file.File.SourcePath))
                     .ToList();
@@ -194,7 +194,7 @@ namespace DifferentialBackup.Systems
                         allParts.Count == 0 ? 0 : allParts.Max(part => part.PartNumber))
                 });
 
-                var fileWorkByPath = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
+                var fileWorkByPath = new Dictionary<string, Entity>(StringComparer.Ordinal);
                 foreach (var entity in storage.Query<FileWorkComponent>())
                 {
                     var component = storage.GetComponent<FileWorkComponent>(entity);
@@ -280,7 +280,7 @@ namespace DifferentialBackup.Systems
                         if (plan.PartNumber != partNumber ||
                             !string.Equals(plan.ArchiveFileName,
                                 $"part-{partNumber:000000}.zip",
-                                StringComparison.OrdinalIgnoreCase) ||
+                                StringComparison.Ordinal) ||
                             plan.Files == null ||
                             plan.State is not (BackupPartState.Planned or BackupPartState.Omitted) ||
                             plan.SourceBytes != plan.Files.Sum(file => file.Length) ||
@@ -333,7 +333,7 @@ namespace DifferentialBackup.Systems
                     !string.Equals(
                         checkpoint.ArchiveFileName,
                         $"part-{partNumber:000000}.zip",
-                        StringComparison.OrdinalIgnoreCase) ||
+                        StringComparison.Ordinal) ||
                     checkpoint.Files == null ||
                     checkpoint.Files.Count != checkpoint.FileCount ||
                     checkpoint.Fingerprint != BackupFingerprint.ForFiles(checkpoint.Files) ||
@@ -398,7 +398,7 @@ namespace DifferentialBackup.Systems
                 existingNumbers.Add(partNumber);
             }
 
-            foreach (var artifact in unacknowledgedArtifacts.Distinct(StringComparer.OrdinalIgnoreCase))
+            foreach (var artifact in unacknowledgedArtifacts.Distinct(StringComparer.Ordinal))
             {
                 File.Delete(artifact);
             }
@@ -419,16 +419,16 @@ namespace DifferentialBackup.Systems
             foreach (var path in Directory.EnumerateFiles(directory, prefix + "*"))
             {
                 var name = Path.GetFileName(path);
-                if (string.Equals(name, prefix + ".zip", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(name, prefix + ".zip.partial", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(name, prefix + ".zip.copying", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(name, prefix + ".zip", StringComparison.Ordinal) ||
+                    string.Equals(name, prefix + ".zip.partial", StringComparison.Ordinal) ||
+                    string.Equals(name, prefix + ".zip.copying", StringComparison.Ordinal))
                 {
                     yield return path;
                 }
-                else if (string.Equals(name, prefix + ".plan.json", StringComparison.OrdinalIgnoreCase) ||
-                         string.Equals(name, prefix + ".index.json", StringComparison.OrdinalIgnoreCase) ||
-                         name.StartsWith(prefix + ".plan.json.", StringComparison.OrdinalIgnoreCase) ||
-                         name.StartsWith(prefix + ".index.json.", StringComparison.OrdinalIgnoreCase))
+                else if (string.Equals(name, prefix + ".plan.json", StringComparison.Ordinal) ||
+                         string.Equals(name, prefix + ".index.json", StringComparison.Ordinal) ||
+                         AtomicJson.IsTemporaryName(name, prefix + ".plan.json") ||
+                         AtomicJson.IsTemporaryName(name, prefix + ".index.json"))
                 {
                     // Durable descriptors are not temporary capture output.
                 }
@@ -446,13 +446,13 @@ namespace DifferentialBackup.Systems
             Guid runId,
             IComponentStorage storage)
         {
-            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
+            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.Ordinal);
             foreach (var candidate in storage.Query<FileWorkComponent>())
             {
                 var component = storage.GetComponent<FileWorkComponent>(candidate);
-                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.StableKey))
+                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.SourcePath))
                 {
-                    fileWorkByKey[component.StableKey] = candidate;
+                    fileWorkByKey[component.SourcePath] = candidate;
                 }
             }
 
@@ -468,14 +468,14 @@ namespace DifferentialBackup.Systems
                 var work = storage.GetComponent<FileWorkComponent>(entity) ?? new FileWorkComponent
                 {
                     RunId = runId,
-                    StableKey = descriptor.SourcePath,
+                    StableKey = descriptor.EntryName,
                     SourcePath = descriptor.SourcePath,
                     RelativePath = descriptor.EntryName,
                     RequestedPass = 0,
                     LastAttemptedPass = -1
                 };
                 work.RunId = runId;
-                work.StableKey = descriptor.SourcePath;
+                work.StableKey = descriptor.EntryName;
                 work.SourcePath = descriptor.SourcePath;
                 work.RelativePath = descriptor.EntryName;
                 work.PartNumber = part.PartNumber;
@@ -495,7 +495,7 @@ namespace DifferentialBackup.Systems
                     storage.SetComponent(entity, new BackupIssueComponent
                     {
                         RunId = runId,
-                        StableKey = descriptor.SourcePath,
+                        StableKey = descriptor.EntryName,
                         Path = descriptor.SourcePath,
                         Stage = "Recovery",
                         Category = "SourceDeferred",
@@ -532,7 +532,7 @@ namespace DifferentialBackup.Systems
             foreach (var path in Directory.EnumerateFiles(directory, "part-*") )
             {
                 var name = Path.GetFileName(path);
-                var marker = name.IndexOf("part-", StringComparison.OrdinalIgnoreCase);
+                var marker = name.IndexOf("part-", StringComparison.Ordinal);
                 if (marker < 0 || name.Length < marker + 11)
                 {
                     continue;
@@ -553,13 +553,13 @@ namespace DifferentialBackup.Systems
             Guid runId,
             IComponentStorage storage)
         {
-            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
+            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.Ordinal);
             foreach (var candidate in storage.Query<FileWorkComponent>())
             {
                 var component = storage.GetComponent<FileWorkComponent>(candidate);
-                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.StableKey))
+                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.SourcePath))
                 {
-                    fileWorkByKey[component.StableKey] = candidate;
+                    fileWorkByKey[component.SourcePath] = candidate;
                 }
             }
 
@@ -575,12 +575,12 @@ namespace DifferentialBackup.Systems
                 var existingWork = storage.GetComponent<FileWorkComponent>(entity) ?? new FileWorkComponent
                 {
                     RunId = runId,
-                    StableKey = descriptor.SourcePath,
+                    StableKey = descriptor.EntryName,
                     SourcePath = descriptor.SourcePath,
                     RelativePath = descriptor.EntryName
                 };
                 existingWork.RunId = runId;
-                existingWork.StableKey = descriptor.SourcePath;
+                existingWork.StableKey = descriptor.EntryName;
                 existingWork.SourcePath = descriptor.SourcePath;
                 existingWork.RelativePath = descriptor.EntryName;
                 existingWork.PartNumber = part.PartNumber;
@@ -605,15 +605,15 @@ namespace DifferentialBackup.Systems
         {
             var acknowledged = acknowledgedFiles
                 .Select(file => file.SourcePath)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                .ToHashSet(StringComparer.Ordinal);
 
-            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.OrdinalIgnoreCase);
+            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.Ordinal);
             foreach (var candidate in storage.Query<FileWorkComponent>())
             {
                 var component = storage.GetComponent<FileWorkComponent>(candidate);
-                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.StableKey))
+                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.SourcePath))
                 {
-                    fileWorkByKey[component.StableKey] = candidate;
+                    fileWorkByKey[component.SourcePath] = candidate;
                 }
             }
 
@@ -634,13 +634,13 @@ namespace DifferentialBackup.Systems
                 var work = storage.GetComponent<FileWorkComponent>(entity) ?? new FileWorkComponent
                 {
                     RunId = runId,
-                    StableKey = descriptor.SourcePath,
+                    StableKey = descriptor.EntryName,
                     SourcePath = descriptor.SourcePath,
                     RelativePath = descriptor.EntryName,
                     LastAttemptedPass = -1
                 };
                 work.RunId = runId;
-                work.StableKey = descriptor.SourcePath;
+                work.StableKey = descriptor.EntryName;
                 work.SourcePath = descriptor.SourcePath;
                 work.RelativePath = descriptor.EntryName;
                 work.PartNumber = null;
@@ -657,7 +657,7 @@ namespace DifferentialBackup.Systems
                     storage.SetComponent(entity, new BackupIssueComponent
                     {
                         RunId = runId,
-                        StableKey = descriptor.SourcePath,
+                        StableKey = descriptor.EntryName,
                         Path = descriptor.SourcePath,
                         Stage = "Recovery",
                         Category = "SourceDeferred",
@@ -782,7 +782,7 @@ namespace DifferentialBackup.Systems
 
             files.Sort((left, right) =>
             {
-                var comparison = StringComparer.OrdinalIgnoreCase.Compare(left.File.EntryName, right.File.EntryName);
+                var comparison = StringComparer.Ordinal.Compare(left.File.EntryName, right.File.EntryName);
                 return comparison != 0
                     ? comparison
                     : StringComparer.Ordinal.Compare(left.File.EntryName, right.File.EntryName);
@@ -896,20 +896,20 @@ namespace DifferentialBackup.Systems
         {
             var expectedArchiveNames = parts
                 .Select(part => part.ArchiveFileName)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                .ToHashSet(StringComparer.Ordinal);
             var expectedCheckpointNames = parts
                 .Select(part => Path.GetFileName(_runState.GetPartCheckpointPath(part.PartNumber)))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                .ToHashSet(StringComparer.Ordinal);
 
             if (Directory.Exists(_runState.StagingDirectory))
             {
                 foreach (var path in Directory.EnumerateFiles(_runState.StagingDirectory, "part-*"))
                 {
                     var name = Path.GetFileName(path);
-                    var archiveName = name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase)
+                    var archiveName = name.EndsWith(".partial", StringComparison.Ordinal)
                         ? name[..^".partial".Length]
                         : name;
-                    if (name.EndsWith(".partial", StringComparison.OrdinalIgnoreCase) &&
+                    if (name.EndsWith(".partial", StringComparison.Ordinal) &&
                         expectedArchiveNames.Contains(archiveName))
                     {
                         File.Delete(path);
@@ -922,10 +922,10 @@ namespace DifferentialBackup.Systems
                 foreach (var path in Directory.EnumerateFiles(workingDirectory, "part-*"))
                 {
                     var name = Path.GetFileName(path);
-                    var archiveName = name.EndsWith(".copying", StringComparison.OrdinalIgnoreCase)
+                    var archiveName = name.EndsWith(".copying", StringComparison.Ordinal)
                         ? name[..^".copying".Length]
                         : name;
-                    if (name.EndsWith(".copying", StringComparison.OrdinalIgnoreCase) &&
+                    if (name.EndsWith(".copying", StringComparison.Ordinal) &&
                         expectedArchiveNames.Contains(archiveName))
                     {
                         File.Delete(path);

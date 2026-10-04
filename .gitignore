@@ -5,6 +5,7 @@
 # Build Folders
 bin/
 obj/
+TestResults/
 
 # User-specific files
 *.rsuser

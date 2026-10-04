@@ -33,7 +33,9 @@ namespace DifferentialBackup
         static void Main(string[] args)
         {
             // --- Initialize Logger ---
-            string logFilePath = Path.Combine(AppContext.BaseDirectory, "differential_backup_pipeline.log");
+            string logDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DifferentialBackup", "Logs");
+            Directory.CreateDirectory(logDirectory);
+            string logFilePath = Path.Combine(logDirectory, "differential_backup_pipeline.log");
             // Ensure logger is assigned to the static field
             _pipelineLogger = new SafePipelineLogger(new FileConsoleLogger(logFilePath));
             // --- Logger Initialized ---
@@ -160,73 +162,39 @@ namespace DifferentialBackup
                 Environment.ExitCode = 2;
                 return;
             }
-            var normalizedSource = Path.GetFullPath(sourceDirectory)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            var normalizedDestination = Path.GetFullPath(backupDestination)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            if (PathsOverlap(normalizedSource, normalizedDestination))
+            sourceDirectory = DirectoryPath.Normalize(sourceDirectory);
+            backupDestination = DirectoryPath.Normalize(backupDestination);
+            using var session = BackupRunSession.Open(sourceDirectory, backupDestination);
+            sourceDirectory = session.SourceDirectory;
+            backupDestination = session.BackupDestination;
+            if (session.CleanupCompleted)
             {
-                _pipelineLogger.Log("[ERROR] Source and backup destinations overlap.");
-                Console.WriteLine("Error: The backup destination must not be inside or contain the source directory.");
-                Environment.ExitCode = 2;
+                Console.WriteLine("Finished cleanup of the completed backup.");
+                Environment.ExitCode = session.CompletionExitCode;
                 return;
             }
-            try // Ensure backup destination can be created/accessed
-            {
-                Directory.CreateDirectory(backupDestination);
-            }
-            catch (Exception ex)
-            {
-                _pipelineLogger.Log($"[ERROR] Cannot create or access backup destination '{backupDestination}': {ex.Message}");
-                Console.WriteLine($"Error accessing backup destination: {ex.Message}");
-                Environment.ExitCode = 2;
-                return;
-            }
-
-            ExclusiveOperationLock? stateLock = null;
-            ExclusiveOperationLock? destinationLock = null;
-            try
-            {
-                stateLock = ExclusiveOperationLock.Acquire(
-                    Path.Combine(AppContext.BaseDirectory, "differential-backup.state.lock"));
-                destinationLock = ExclusiveOperationLock.Acquire(
-                    Path.Combine(backupDestination, ".differential-backup.lock"));
-            }
-            catch (Exception ex)
-            {
-                stateLock?.Dispose();
-                destinationLock?.Dispose();
-                _pipelineLogger.Log($"[ERROR] Could not acquire backup locks: {ex.Message}");
-                Console.WriteLine($"Backup failed: {ex.Message}");
-                Environment.ExitCode = 2;
-                return;
-            }
-
-            using (stateLock)
-            using (destinationLock)
-            {
-
-
             _pipelineLogger.Log("Initializing storage and loading persisted data.");
             // Initialize storage and load persisted data
             var storage = new ComponentStorage();
 
             // File paths for persisted data
-            var hashesFilePath = Path.Combine(AppContext.BaseDirectory, "fileHashes.json");
-            var backupDatesFilePath = Path.Combine(AppContext.BaseDirectory, "backupDates.json");
+            var destinationState = new DestinationStateStore(sourceDirectory, backupDestination);
+            var hashesFilePath = destinationState.StatePath;
+            var backupDatesFilePath = Path.Combine(backupDestination, DestinationStateStore.FileName);
 
             // Load persisted data
             _pipelineLogger.Log($"Loading file hashes from '{hashesFilePath}'.");
-            var fileHashes = DataPersistence.LoadFileHashes(hashesFilePath);
+            var fileHashes = destinationState.LoadHashes();
             _pipelineLogger.Log($"Loading backup dates from '{backupDatesFilePath}'.");
-            var backupDates = DataPersistence.LoadBackupDates(backupDatesFilePath);
+            var backupDates = DestinationStateStore.ReadHistory(backupDestination);
             _pipelineLogger.Log($"Loaded {fileHashes.Count} file hashes and {backupDates.Count} backup dates.");
-            var backupRunState = new BackupRunState(sourceDirectory, backupDestination);
+            var backupRunState = session.CreateRunState();
+            backupRunState.DestinationState = destinationState;
 
             // The initial entity acts as a starting point for the FileDiscoverySystem
             var initialEntity = new Entity();
             var entities = new List<Entity> { initialEntity };
-            var runId = Guid.NewGuid();
+            var runId = session.RunId;
             storage.SetComponent(initialEntity, new OperationComponent
             {
                 RunId = runId,
@@ -344,7 +312,11 @@ namespace DifferentialBackup
             }
 
             var outcome = storage.GetComponent<OperationOutcomeComponent>(initialEntity);
-            if (outcome?.Outcome == OperationOutcome.Failed || outcome?.Outcome == OperationOutcome.Cancelled)
+            if (outcome == null)
+            {
+                throw new InvalidOperationException("Backup returned without a terminal outcome; resumable state was retained.");
+            }
+            if (outcome.Outcome == OperationOutcome.Failed || outcome.Outcome == OperationOutcome.Cancelled)
             {
                 Environment.ExitCode = outcome.ExitCode;
                 Console.CancelKeyPress -= cancelHandler;
@@ -354,9 +326,9 @@ namespace DifferentialBackup
             // Publication adds a date only after every part and the manifest are durable.
             bool newBackupOccurred = backupDates.Count > backupDateCountBeforeRun;
 
-            backupRunState.ClearRun();
+            session.Complete(backupRunState, outcome.ExitCode);
             _pipelineLogger.Log("Backup operation complete.");
-            if (outcome?.Outcome is OperationOutcome.IncompleteBackup or OperationOutcome.Warnings)
+            if (outcome.Outcome is OperationOutcome.IncompleteBackup or OperationOutcome.Warnings)
             {
                 _pipelineLogger.Log("Backup completed with warnings; unresolved source paths remain in the report.");
                 Console.WriteLine("Backup completed with warnings. Some source paths could not be captured.");
@@ -373,15 +345,6 @@ namespace DifferentialBackup
             }
             Environment.ExitCode = outcome?.ExitCode ?? 0;
             Console.CancelKeyPress -= cancelHandler;
-            }
-        }
-
-        private static bool PathsOverlap(string left, string right)
-        {
-            static string WithSeparator(string value) => value + Path.DirectorySeparatorChar;
-            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase) ||
-                WithSeparator(left).StartsWith(WithSeparator(right), StringComparison.OrdinalIgnoreCase) ||
-                WithSeparator(right).StartsWith(WithSeparator(left), StringComparison.OrdinalIgnoreCase);
         }
 
         // --- Restore Operation ---
@@ -455,8 +418,6 @@ namespace DifferentialBackup
                 return;
             }
 
-            using var restoreStateLock = ExclusiveOperationLock.Acquire(
-                Path.Combine(AppContext.BaseDirectory, "differential-backup.state.lock"));
             using var restoreBackupLock = ExclusiveOperationLock.Acquire(
                 Path.Combine(backupDestination, ".differential-backup.lock"));
             using var restoreDestinationLock = ExclusiveOperationLock.Acquire(
@@ -473,9 +434,9 @@ namespace DifferentialBackup
             _pipelineLogger.Log("Initializing storage and loading backup dates data for Restore.");
             // Initialize storage and load backup dates
             var storage = new ComponentStorage();
-            var backupDatesFilePath = Path.Combine(AppContext.BaseDirectory, "backupDates.json");
+            var backupDatesFilePath = Path.Combine(backupDestination, DestinationStateStore.FileName);
             _pipelineLogger.Log($"Loading backup dates from '{backupDatesFilePath}'.");
-            var backupDates = DataPersistence.LoadBackupDates(backupDatesFilePath);
+            var backupDates = DestinationStateStore.ReadHistory(backupDestination);
             _pipelineLogger.Log($"Loaded {backupDates.Count} backup dates.");
 
             if (!backupDates.Any() && requestedBackupDate == null)
@@ -660,9 +621,9 @@ namespace DifferentialBackup
 
             _pipelineLogger.Log("Initializing storage and loading persisted data for Query.");
             var storage = new ComponentStorage();
-            var backupDatesFilePath = Path.Combine(AppContext.BaseDirectory, "backupDates.json");
+            var backupDatesFilePath = Path.Combine(backupDestination, DestinationStateStore.FileName);
             _pipelineLogger.Log($"Loading backup dates from '{backupDatesFilePath}'.");
-            var backupDates = DataPersistence.LoadBackupDates(backupDatesFilePath);
+            var backupDates = DestinationStateStore.ReadHistory(backupDestination);
             _pipelineLogger.Log($"Loaded {backupDates.Count} backup dates.");
 
             var initialEntity = new Entity();
@@ -908,12 +869,12 @@ namespace DifferentialBackup
             Console.WriteLine(@"  DifferentialBackup.exe help");
             Console.WriteLine();
             Console.WriteLine("Data Files:");
-            Console.WriteLine($"  State information (file hashes, backup dates) is stored in JSON files");
-            Console.WriteLine($"  (fileHashes.json, backupDates.json) in the application directory:");
-            Console.WriteLine($"  {AppContext.BaseDirectory}");
+            Console.WriteLine("  Baselines are stored in .differential-backup.state.json in each backup destination.");
+            Console.WriteLine("  History is read from that destination's published sets and legacy ZIPs.");
+            Console.WriteLine("  Backup requires writable source and destination roots for temporary run tags.");
             Console.WriteLine($"Log File:");
             Console.WriteLine($"  Detailed logs are written to:");
-            Console.WriteLine($"  {Path.Combine(AppContext.BaseDirectory, "differential_backup_pipeline.log")}");
+            Console.WriteLine($"  {Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DifferentialBackup", "Logs", "differential_backup_pipeline.log")}");
             Console.WriteLine();
             Console.WriteLine("Backup retries source paths after 1, 1, 2, 3, 5, 8, and 13 minutes.");
             Console.WriteLine("A backup with captured content and unresolved paths is published with warnings (exit 1).");

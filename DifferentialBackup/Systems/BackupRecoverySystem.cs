@@ -189,13 +189,13 @@ public sealed class BackupRecoverySystem : IEntitySetSystem
                             {
                                 var issue = storage.GetComponent<BackupIssueComponent>(candidate);
                                 return issue != null && issue.RunId == operation.RunId &&
-                                    string.Equals(issue.StableKey, manifestIssue.Path, StringComparison.OrdinalIgnoreCase);
+                                    string.Equals(issue.StableKey, manifestIssue.Path, StringComparison.Ordinal);
                             }) ?? new Entity();
                         storage.SetComponent(issueEntity, new BackupIssueComponent
                         {
                             RunId = operation.RunId,
                             StableKey = manifestIssue.Path,
-                            Path = manifestIssue.Path,
+                            Path = _runState.ResolveSourcePath(manifestIssue.Path),
                             Stage = manifestIssue.Stage,
                             Category = manifestIssue.Category,
                             ExceptionType = manifestIssue.ErrorType,
@@ -312,13 +312,13 @@ public sealed class BackupRecoverySystem : IEntitySetSystem
                     {
                         var work = storage.GetComponent<FileWorkComponent>(candidate);
                         return work != null && work.RunId == operation.RunId &&
-                            string.Equals(work.StableKey, descriptor.SourcePath, StringComparison.OrdinalIgnoreCase);
+                            string.Equals(work.SourcePath, descriptor.SourcePath, StringComparison.Ordinal);
                     }) ?? new Entity();
                 storage.SetComponent(fileEntity, new FilePathComponent { FilePath = descriptor.SourcePath });
                 storage.SetComponent(fileEntity, new FileWorkComponent
                 {
                     RunId = operation.RunId,
-                    StableKey = descriptor.SourcePath,
+                    StableKey = descriptor.EntryName,
                     SourcePath = descriptor.SourcePath,
                     RelativePath = descriptor.EntryName,
                     State = FileWorkState.Captured,
