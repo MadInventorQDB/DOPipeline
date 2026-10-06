@@ -74,10 +74,6 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
             if (!_runState.RecoverPublishedState(_fileHashes, _backupDates, applyState: false, completePublication: false))
                 throw new InvalidDataException("Published artifacts have not been validated.");
 
-            // Older journals may already mark the executable's shared state as
-            // saved. They still need evidence in this selected destination.
-            _runState.DestinationState?.EnsureCommitted(_runState);
-
             var mergedHashes = BuildPublishedHashState(operation, publication, storage);
             var commit = storage.GetComponent<StateCommitComponent>(operationEntity)
                 ?? new StateCommitComponent
@@ -89,6 +85,7 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
                 };
             if (commit.Step == StateCommitStep.Complete)
             {
+                _runState.DestinationState?.EnsureCommitted(_runState);
                 _fileHashes.Clear();
                 foreach (var pair in mergedHashes)
                 {
@@ -121,6 +118,13 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
                     _runState.SaveStateCommitStep(StateCommitStep.HashesSaved);
                     commit.Step = StateCommitStep.HashesSaved;
                     storage.SetComponent(operationEntity, commit);
+                }
+
+                // Older journals can mark legacy state saved without recording
+                // evidence in this destination. Ensure it only on resumed steps.
+                else
+                {
+                    _runState.DestinationState?.EnsureCommitted(_runState);
                 }
 
                 if (commit.Step < StateCommitStep.DatesSaved)
@@ -184,37 +188,42 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
             throw new InvalidDataException("Published receipt contains duplicate or missing part identities.");
         }
 
-        foreach (var partNumber in publication.PartNumbers.Distinct())
+        var partEntities = new Dictionary<int, Entity>();
+        foreach (var entity in storage.Query<BackupPartComponent, BackupPartStatusComponent>())
         {
-            var partEntity = storage.Query<BackupPartComponent, BackupPartStatusComponent>()
-                .FirstOrDefault(entity =>
-                {
-                    var part = storage.GetComponent<BackupPartComponent>(entity);
-                    var status = storage.GetComponent<BackupPartStatusComponent>(entity);
-                    return part != null && status != null &&
-                        part.RunId == operation.RunId &&
-                        part.PartNumber == partNumber &&
-                        status.RunId == operation.RunId;
-                });
+            var part = storage.GetComponent<BackupPartComponent>(entity);
+            var status = storage.GetComponent<BackupPartStatusComponent>(entity);
+            if (part != null && status != null && part.RunId == operation.RunId && status.RunId == operation.RunId)
+                partEntities.TryAdd(part.PartNumber, entity);
+        }
+        var manifestParts = (_runState.RecoveredManifest
+            ?? throw new InvalidDataException("Validated published manifest is missing."))
+            .Parts.ToDictionary(part => part.PartNumber);
+
+        foreach (var partNumber in publication.PartNumbers)
+        {
+            partEntities.TryGetValue(partNumber, out var partEntity);
             if (partEntity == null)
             {
                 throw new InvalidDataException($"Published part {partNumber} is missing.");
             }
 
+            var publishedPart = manifestParts.GetValueOrDefault(partNumber)
+                ?? throw new InvalidDataException($"Published manifest omits part {partNumber}.");
             var status = storage.GetComponent<BackupPartStatusComponent>(partEntity)!;
             var receipt = storage.GetComponent<PartReceiptComponent>(partEntity);
             if (status.State != BackupPartState.Transferred || receipt == null ||
                 receipt.RunId != operation.RunId ||
                 !File.Exists(status.DestinationArchivePath) ||
+                !string.Equals(status.DestinationArchivePath, Path.Combine(publication.FinalDirectory, publishedPart.ArchiveFileName), StringComparison.Ordinal) ||
                 (!string.IsNullOrWhiteSpace(receipt.ArchiveSha256) &&
-                 !string.Equals(ComputeFileHash(status.DestinationArchivePath),
-                     receipt.ArchiveSha256, StringComparison.OrdinalIgnoreCase)))
+                 !string.Equals(publishedPart.ArchiveSha256, receipt.ArchiveSha256, StringComparison.OrdinalIgnoreCase)))
             {
                 throw new InvalidDataException($"Published part {partNumber} failed receipt validation.");
             }
 
-            var publishedPart = _runState.RecoveredManifest?.Parts.SingleOrDefault(part => part.PartNumber == partNumber)
-                ?? throw new InvalidDataException($"Published manifest omits part {partNumber}.");
+            // RecoverPublishedState just validated these payloads. Compare
+            // receipts with that manifest, without another full archive scan.
             var publishedIndex = BackupIndexReader.Read(publication.FinalDirectory, publishedPart);
             foreach (var descriptor in publishedIndex?.Files ?? receipt.Files)
             {
@@ -233,12 +242,6 @@ public sealed class BackupStateCommitSystem : IEntitySetSystem
         }
 
         return merged;
-    }
-
-    private static string ComputeFileHash(string path)
-    {
-        using var stream = File.OpenRead(path);
-        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
     }
 
     public Result Execute(Entity entity, IComponentStorage storage) =>

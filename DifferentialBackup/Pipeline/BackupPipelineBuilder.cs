@@ -38,6 +38,7 @@ namespace DifferentialBackup.Pipeline
             var pipelineBuilder = new PipelineBuilder();
             backupRunState ??= new BackupRunState(sourceDirectory, backupDestination);
             batchOptions ??= new BackupBatchOptions();
+            backupRunState.VerificationLogger = logger;
 
             pipelineBuilder.WithLogger(logger); // <-- Set the logger
 

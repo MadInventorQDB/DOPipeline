@@ -247,6 +247,16 @@ namespace DifferentialBackup.Systems
                 return Result.Success();
             }
 
+            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.Ordinal);
+            foreach (var candidate in storage.Query<FileWorkComponent>())
+            {
+                var component = storage.GetComponent<FileWorkComponent>(candidate);
+                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.SourcePath))
+                {
+                    fileWorkByKey[component.SourcePath] = candidate;
+                }
+            }
+
             var existingNumbers = storage.Query<BackupPartComponent, BackupPartStatusComponent>()
                 .Where(entity => storage.GetComponent<BackupPartComponent>(entity)?.RunId == runId)
                 .Select(entity => storage.GetComponent<BackupPartComponent>(entity)?.PartNumber)
@@ -320,7 +330,7 @@ namespace DifferentialBackup.Systems
                             LocalArchivePath = Path.Combine(_runState.StagingDirectory, plannedPart.ArchiveFileName),
                             DestinationArchivePath = Path.Combine(workingDirectory, plannedPart.ArchiveFileName)
                         });
-                        RestorePlannedFileRows(plannedPart, plannedState, runId, storage);
+                        RestorePlannedFileRows(plannedPart, plannedState, runId, storage, fileWorkByKey);
                         existingNumbers.Add(partNumber);
                         continue;
                     }
@@ -384,7 +394,7 @@ namespace DifferentialBackup.Systems
                     IndexLength = new FileInfo(_runState.GetPartCheckpointPath(partNumber)).Length,
                     IndexSha256 = ComputeFileHash(_runState.GetPartCheckpointPath(partNumber))
                 });
-                RestoreRecoveredFileRows(part, runId, storage);
+                RestoreRecoveredFileRows(part, runId, storage, fileWorkByKey);
                 var persistedPlan = _runState.LoadPartPlan(partNumber);
                 if (persistedPlan != null)
                 {
@@ -393,7 +403,8 @@ namespace DifferentialBackup.Systems
                         checkpoint.Files,
                         part.BackupDate,
                         runId,
-                        storage);
+                        storage,
+                        fileWorkByKey);
                 }
                 existingNumbers.Add(partNumber);
             }
@@ -444,18 +455,8 @@ namespace DifferentialBackup.Systems
             BackupPartComponent part,
             BackupPartState partState,
             Guid runId,
-            IComponentStorage storage)
+            IComponentStorage storage, Dictionary<string, Entity> fileWorkByKey)
         {
-            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.Ordinal);
-            foreach (var candidate in storage.Query<FileWorkComponent>())
-            {
-                var component = storage.GetComponent<FileWorkComponent>(candidate);
-                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.SourcePath))
-                {
-                    fileWorkByKey[component.SourcePath] = candidate;
-                }
-            }
-
             foreach (var descriptor in part.Files)
             {
                 if (!fileWorkByKey.TryGetValue(descriptor.SourcePath, out var entity))
@@ -510,7 +511,7 @@ namespace DifferentialBackup.Systems
             }
         }
 
-        private static bool IsValidArtifact(string path, long expectedLength, string expectedHash)
+        private bool IsValidArtifact(string path, long expectedLength, string expectedHash)
         {
             if (!File.Exists(path) || new FileInfo(path).Length != expectedLength)
             {
@@ -551,18 +552,8 @@ namespace DifferentialBackup.Systems
         private static void RestoreRecoveredFileRows(
             BackupPartComponent part,
             Guid runId,
-            IComponentStorage storage)
+            IComponentStorage storage, Dictionary<string, Entity> fileWorkByKey)
         {
-            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.Ordinal);
-            foreach (var candidate in storage.Query<FileWorkComponent>())
-            {
-                var component = storage.GetComponent<FileWorkComponent>(candidate);
-                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.SourcePath))
-                {
-                    fileWorkByKey[component.SourcePath] = candidate;
-                }
-            }
-
             foreach (var descriptor in part.Files)
             {
                 if (!fileWorkByKey.TryGetValue(descriptor.SourcePath, out var entity))
@@ -601,21 +592,11 @@ namespace DifferentialBackup.Systems
             IReadOnlyList<BackupPartFile> acknowledgedFiles,
             DateTime backupDate,
             Guid runId,
-            IComponentStorage storage)
+            IComponentStorage storage, Dictionary<string, Entity> fileWorkByKey)
         {
             var acknowledged = acknowledgedFiles
                 .Select(file => file.SourcePath)
                 .ToHashSet(StringComparer.Ordinal);
-
-            var fileWorkByKey = new Dictionary<string, Entity>(StringComparer.Ordinal);
-            foreach (var candidate in storage.Query<FileWorkComponent>())
-            {
-                var component = storage.GetComponent<FileWorkComponent>(candidate);
-                if (component != null && component.RunId == runId && !string.IsNullOrEmpty(component.SourcePath))
-                {
-                    fileWorkByKey[component.SourcePath] = candidate;
-                }
-            }
 
             foreach (var descriptor in plan.Files)
             {
@@ -672,11 +653,7 @@ namespace DifferentialBackup.Systems
             }
         }
 
-        private static string ComputeFileHash(string path)
-        {
-            using var stream = File.OpenRead(path);
-            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
-        }
+        private string ComputeFileHash(string path) => _runState.ComputeArtifactHash(path);
 
         public Result Execute(Entity entity, IComponentStorage storage)
         {

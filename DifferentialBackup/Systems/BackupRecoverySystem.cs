@@ -182,15 +182,20 @@ public sealed class BackupRecoverySystem : IEntitySetSystem
             {
                 if (recoveredManifest?.Issues != null)
                 {
+                    var issueEntities = new Dictionary<string, Entity>(StringComparer.Ordinal);
+                    foreach (var candidate in storage.Query<BackupIssueComponent>())
+                    {
+                        var issue = storage.GetComponent<BackupIssueComponent>(candidate);
+                        if (issue != null && issue.RunId == operation.RunId)
+                            issueEntities.TryAdd(issue.StableKey, candidate);
+                    }
                     foreach (var manifestIssue in recoveredManifest.Issues)
                     {
-                        var issueEntity = storage.Query<BackupIssueComponent>()
-                            .FirstOrDefault(candidate =>
-                            {
-                                var issue = storage.GetComponent<BackupIssueComponent>(candidate);
-                                return issue != null && issue.RunId == operation.RunId &&
-                                    string.Equals(issue.StableKey, manifestIssue.Path, StringComparison.Ordinal);
-                            }) ?? new Entity();
+                        if (!issueEntities.TryGetValue(manifestIssue.Path, out var issueEntity))
+                        {
+                            issueEntity = new Entity();
+                            issueEntities.Add(manifestIssue.Path, issueEntity);
+                        }
                         storage.SetComponent(issueEntity, new BackupIssueComponent
                         {
                             RunId = operation.RunId,
@@ -258,19 +263,32 @@ public sealed class BackupRecoverySystem : IEntitySetSystem
             SourceBytes = manifest.SourceBytes
         });
 
+        var partEntities = new Dictionary<int, Entity>();
+        foreach (var candidate in storage.Query<BackupPartComponent>())
+        {
+            var part = storage.GetComponent<BackupPartComponent>(candidate);
+            if (part != null && part.RunId == operation.RunId)
+                partEntities.TryAdd(part.PartNumber, candidate);
+        }
+        var fileEntities = new Dictionary<string, Entity>(StringComparer.Ordinal);
+        foreach (var candidate in storage.Query<FileWorkComponent>())
+        {
+            var work = storage.GetComponent<FileWorkComponent>(candidate);
+            if (work != null && work.RunId == operation.RunId)
+                fileEntities.TryAdd(work.SourcePath, candidate);
+        }
+
         var highestPart = 0;
         foreach (var manifestPart in manifest.Parts)
         {
             highestPart = Math.Max(highestPart, manifestPart.PartNumber);
             var checkpoint = _runState.LoadPartCheckpoint(manifestPart.PartNumber);
             var files = checkpoint?.Files?.ToArray() ?? Array.Empty<BackupPartFile>();
-            var partEntity = storage.Query<BackupPartComponent>()
-                .FirstOrDefault(candidate =>
-                {
-                    var part = storage.GetComponent<BackupPartComponent>(candidate);
-                    return part != null && part.RunId == operation.RunId &&
-                        part.PartNumber == manifestPart.PartNumber;
-                }) ?? new Entity();
+            if (!partEntities.TryGetValue(manifestPart.PartNumber, out var partEntity))
+            {
+                partEntity = new Entity();
+                partEntities.Add(manifestPart.PartNumber, partEntity);
+            }
             storage.SetComponent(partEntity, new BackupPartComponent
             {
                 RunId = operation.RunId,
@@ -307,13 +325,11 @@ public sealed class BackupRecoverySystem : IEntitySetSystem
 
             foreach (var descriptor in files)
             {
-                var fileEntity = storage.Query<FileWorkComponent>()
-                    .FirstOrDefault(candidate =>
-                    {
-                        var work = storage.GetComponent<FileWorkComponent>(candidate);
-                        return work != null && work.RunId == operation.RunId &&
-                            string.Equals(work.SourcePath, descriptor.SourcePath, StringComparison.Ordinal);
-                    }) ?? new Entity();
+                if (!fileEntities.TryGetValue(descriptor.SourcePath, out var fileEntity))
+                {
+                    fileEntity = new Entity();
+                    fileEntities.Add(descriptor.SourcePath, fileEntity);
+                }
                 storage.SetComponent(fileEntity, new FilePathComponent { FilePath = descriptor.SourcePath });
                 storage.SetComponent(fileEntity, new FileWorkComponent
                 {
@@ -341,9 +357,5 @@ public sealed class BackupRecoverySystem : IEntitySetSystem
         });
     }
 
-    private static string ComputeFileHash(string path)
-    {
-        using var stream = File.OpenRead(path);
-        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
-    }
+    private string ComputeFileHash(string path) => _runState.ComputeArtifactHash(path);
 }

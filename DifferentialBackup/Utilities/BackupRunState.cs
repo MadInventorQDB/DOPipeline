@@ -18,6 +18,11 @@ namespace DifferentialBackup.Utilities
         private long _journalSequence;
         private readonly BackupInitialization? _identity;
         public DestinationStateStore? DestinationState { get; set; }
+        internal DOPipeline.Logging.IPipelineLogger? VerificationLogger { get; set; }
+        internal Action<string, long>? ArtifactBytesReadObserver { get; set; }
+
+        internal string ComputeArtifactHash(string path) =>
+            ArtifactChecksum.ComputeSha256(path, VerificationLogger, ArtifactBytesReadObserver);
 
         public BackupRunState(
             string sourceDirectory,
@@ -241,8 +246,14 @@ namespace DifferentialBackup.Utilities
                             $"Published backup part is missing or incomplete: '{archivePath}'.");
                     }
 
+                    var checkpoint = publishedIndex ?? LoadPartCheckpoint(manifestPart.PartNumber);
+                    // One observation can be compared with every expected digest
+                    // at this boundary; independent boundaries still read bytes.
+                    var observedHash = !string.IsNullOrWhiteSpace(manifestPart.ArchiveSha256) ||
+                        !string.IsNullOrWhiteSpace(checkpoint?.ArchiveSha256)
+                        ? ComputeFileHash(archivePath) : null;
                     if (!string.IsNullOrWhiteSpace(manifestPart.ArchiveSha256) &&
-                        !string.Equals(ComputeFileHash(archivePath), manifestPart.ArchiveSha256, StringComparison.OrdinalIgnoreCase))
+                        !string.Equals(observedHash, manifestPart.ArchiveSha256, StringComparison.OrdinalIgnoreCase))
                     {
                         throw new InvalidDataException(
                             $"Published backup part checksum is invalid: '{archivePath}'.");
@@ -267,9 +278,8 @@ namespace DifferentialBackup.Utilities
                         }
                     }
 
-                    var checkpoint = publishedIndex ?? LoadPartCheckpoint(manifestPart.PartNumber);
                     if (checkpoint != null && !string.IsNullOrEmpty(checkpoint.ArchiveSha256) &&
-                        !string.Equals(checkpoint.ArchiveSha256, ComputeFileHash(archivePath), StringComparison.OrdinalIgnoreCase))
+                        !string.Equals(checkpoint.ArchiveSha256, observedHash, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidDataException($"Published backup does not match its acknowledged checkpoint: '{archivePath}'.");
                     if (manifest.FormatVersion >= 3 &&
                         (checkpoint == null ||
@@ -314,9 +324,9 @@ namespace DifferentialBackup.Utilities
 
                 if (completePublication && !Job.Published)
                 {
-                    // The directory rename is the publication boundary. If a
-                    // process stopped before the job marker was flushed, the
-                    // validated final directory is still authoritative.
+                    // Rename records provisional publication. State commit still
+                    // validates actual bytes after this durable job marker; neither
+                    // the final name nor a persisted receipt authorizes a baseline.
                     Job.Published = true;
                     Job.StateCommitStep = StateCommitStep.Pending;
                     SaveJsonAtomic(JobPath, Job);
@@ -700,7 +710,12 @@ namespace DifferentialBackup.Utilities
             _checkpointObserver.Reached(name);
         }
 
-        public void SaveTransferredPart(int number, string archivePath, string indexPath)
+        public void SaveTransferredPart(int number, string archivePath, string indexPath) =>
+            SaveTransferredPart(number, archivePath, indexPath, ComputeFileHash(archivePath));
+
+        // Only the transfer system supplies a checksum it has just read from
+        // the flushed destination copy. Recovery always verifies persisted bytes.
+        internal void SaveTransferredPart(int number, string archivePath, string indexPath, string verifiedArchiveHash)
         {
             lock (_lock)
             {
@@ -709,7 +724,7 @@ namespace DifferentialBackup.Utilities
                     PartNumber = number,
                     ArchivePath = Job?.FormatVersion >= 3 ? Path.GetRelativePath(_backupDestination, archivePath).Replace(Path.DirectorySeparatorChar, '/') : archivePath,
                     IndexPath = Job?.FormatVersion >= 3 ? Path.GetRelativePath(_backupDestination, indexPath).Replace(Path.DirectorySeparatorChar, '/') : indexPath,
-                    ArchiveSha256 = ComputeFileHash(archivePath), IndexSha256 = ComputeFileHash(indexPath)
+                    ArchiveSha256 = verifiedArchiveHash, IndexSha256 = ComputeFileHash(indexPath)
                 });
             }
         }
@@ -1086,11 +1101,7 @@ namespace DifferentialBackup.Utilities
             return new DateTime(value.Ticks - value.Ticks % TimeSpan.TicksPerSecond, value.Kind);
         }
 
-        private static string ComputeFileHash(string path)
-        {
-            using var stream = File.OpenRead(path);
-            return Convert.ToHexString(SHA256.HashData(stream));
-        }
+        private string ComputeFileHash(string path) => ComputeArtifactHash(path);
 
         private static string NormalizeDirectory(string path)
         {

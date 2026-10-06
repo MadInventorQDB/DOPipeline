@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
-using System.Security.Cryptography;
+using DOPipeline.Logging;
 
 namespace DifferentialBackup.Utilities;
 
@@ -25,6 +25,8 @@ public sealed class DestinationStateStore
     private readonly string _destination;
     private readonly string _source;
     private readonly string _sourceScope;
+    internal IPipelineLogger? VerificationLogger { get; set; }
+    internal Action<string, long>? ArtifactBytesReadObserver { get; set; }
 
     public DestinationStateStore(string source, string destination)
     {
@@ -63,18 +65,25 @@ public sealed class DestinationStateStore
                         string.Equals(publicationHash, evidence, StringComparison.OrdinalIgnoreCase);
                 if (!hasEvidence)
                     throw new InvalidDataException("Baseline publication evidence is invalid.");
+                // Build this lookup once per publication, not once per part/file.
+                var needed = publication.ToDictionary(pair => pair.Key, pair => pair.Value.Hash, StringComparer.Ordinal);
                 var published = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var part in manifest.Parts)
                 {
                     var index = BackupIndexReader.Read(directory, part);
-                    if (index == null) continue; // Older sets without relative indexes require a fresh capture.
+                    if (index == null || index.FormatVersion < 3) continue; // Older sets require a fresh capture.
+                    // An index is actual-byte validated above. Parts whose files
+                    // were all superseded supply no skip-capture authority. Only
+                    // contributing parts need a payload scan at this load boundary.
+                    if (!index.Files.Any(file => needed.TryGetValue(file.SourcePath, out var expected) &&
+                        string.Equals(file.Hash, expected, StringComparison.OrdinalIgnoreCase))) continue;
                     var archive = Path.Combine(directory, part.ArchiveFileName);
                     if (Path.GetFileName(part.ArchiveFileName) != part.ArchiveFileName ||
                         !File.Exists(archive) || new FileInfo(archive).Length != part.ArchiveBytes ||
                         !string.Equals(Hash(archive), part.ArchiveSha256, StringComparison.OrdinalIgnoreCase))
                         throw new InvalidDataException("Baseline backup archive is missing or corrupt.");
-                    if (index.FormatVersion >= 3)
-                        foreach (var file in index.Files) published.Add(file.SourcePath, file.Hash);
+                    foreach (var file in index.Files)
+                        if (needed.ContainsKey(file.SourcePath)) published.Add(file.SourcePath, file.Hash);
                 }
                 foreach (var pair in publication)
                     if (published.TryGetValue(pair.Key, out var hash) && string.Equals(hash, pair.Value.Hash, StringComparison.OrdinalIgnoreCase))
@@ -101,9 +110,9 @@ public sealed class DestinationStateStore
                     files[relative] = new() { Hash = file.Hash, PublicationDate = manifest.BackupDate };
             }
         }
-        using var stream = File.OpenRead(Path.Combine(published, "manifest.json"));
-        state.CommittedRuns[run.RunId] = Convert.ToHexString(SHA256.HashData(stream));
+        state.CommittedRuns[run.RunId] = Hash(Path.Combine(published, "manifest.json"));
         AtomicJson.Write(StatePath, state);
+        run.Checkpoint("destination-state-committed");
     }
 
     public void EnsureCommitted(BackupRunState run)
@@ -144,9 +153,5 @@ public sealed class DestinationStateStore
         return dates;
     }
 
-    private static string Hash(string path)
-    {
-        using var stream = File.OpenRead(path);
-        return Convert.ToHexString(SHA256.HashData(stream));
-    }
+    private string Hash(string path) => ArtifactChecksum.ComputeSha256(path, VerificationLogger, ArtifactBytesReadObserver);
 }

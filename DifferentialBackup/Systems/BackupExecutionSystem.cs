@@ -76,7 +76,7 @@ namespace DifferentialBackup.Systems
                 var status = storage.GetComponent<BackupPartStatusComponent>(entity);
                 if (status != null)
                 {
-                    parts.Add(new PartEntity(part, status));
+                    parts.Add(new PartEntity(entity, part, status));
                 }
             }
 
@@ -398,7 +398,7 @@ namespace DifferentialBackup.Systems
         {
             var part = item.Part;
             var status = item.Status;
-            var receipt = FindReceipt(part, storage);
+            var receipt = storage.GetComponent<PartReceiptComponent>(item.Entity);
             if (status.State == BackupPartState.Transferred &&
                 File.Exists(status.DestinationArchivePath) &&
                 receipt != null &&
@@ -608,7 +608,7 @@ namespace DifferentialBackup.Systems
                         part.Files = remaining.ToArray();
                         part.SourceBytes = remaining.Sum(file => file.Length);
                         part.Fingerprint = BackupFingerprint.ForFiles(remaining);
-                        _runState.SavePartCheckpoint(new BackupPartCheckpoint
+                        var checkpoint = new BackupPartCheckpoint
                         {
                             PartNumber = part.PartNumber,
                             ArchiveFileName = part.ArchiveFileName,
@@ -618,10 +618,11 @@ namespace DifferentialBackup.Systems
                             ArchiveBytes = status.ArchiveBytes,
                             ArchiveSha256 = ComputeFileHash(status.LocalArchivePath),
                             Files = part.Files.ToList()
-                        });
+                        };
+                        _runState.SavePartCheckpoint(checkpoint);
                         status.State = BackupPartState.Staged;
                         MarkCaptured(part, storage, fileWorkLookup);
-                        SetReceipt(item, storage);
+                        SetReceiptFromCheckpoint(item, checkpoint, storage);
                         progress.CompleteCompressionPart(part);
                         return;
                     }
@@ -817,9 +818,10 @@ namespace DifferentialBackup.Systems
                         throw new IOException($"Transferred part length does not match for '{part.ArchiveFileName}'.");
                     }
 
-                    var receipt = FindReceipt(part, storage);
-                    if (receipt != null && !string.IsNullOrWhiteSpace(receipt.ArchiveSha256) &&
-                        !string.Equals(receipt.ArchiveSha256, ComputeFileHash(copyingPath), StringComparison.OrdinalIgnoreCase))
+                    var receipt = storage.GetComponent<PartReceiptComponent>(item.Entity);
+                    var transferredHash = ComputeFileHash(copyingPath);
+                    if (receipt == null || string.IsNullOrWhiteSpace(receipt.ArchiveSha256) ||
+                        !string.Equals(receipt.ArchiveSha256, transferredHash, StringComparison.OrdinalIgnoreCase))
                     {
                         throw new InvalidDataException($"Transferred part checksum does not match for '{part.ArchiveFileName}'.");
                     }
@@ -827,13 +829,10 @@ namespace DifferentialBackup.Systems
                     File.Move(copyingPath, status.DestinationArchivePath, true);
                     _runState.Checkpoint("destination-archive-renamed");
                     var destinationIndex = TransferIndex(item);
-                    _runState.SaveTransferredPart(part.PartNumber, status.DestinationArchivePath, destinationIndex);
+                    _runState.SaveTransferredPart(part.PartNumber, status.DestinationArchivePath, destinationIndex, transferredHash);
                     status.State = BackupPartState.Transferred;
-                    // A receipt is the durable acknowledgement that the
-                    // bytes described by the part were captured.  Create it
-                    // before deleting the local copy so a recovered world can
-                    // validate the transfer without rereading source files.
-                    SetReceipt(item, storage);
+                    // The capture receipt already identifies these verified bytes.
+                    // Persist transfer acknowledgement before deleting staging.
                     _runState.Checkpoint("part-transfer-committed");
                     File.Delete(status.LocalArchivePath);
                     progress.CompleteTransferPart(part);
@@ -856,30 +855,6 @@ namespace DifferentialBackup.Systems
                 finally
                 {
                     localPartSlots.Release();
-                }
-            }
-        }
-
-        private void SetReceipt(PartEntity item, IComponentStorage storage)
-        {
-            var indexPath = _runState.GetPartCheckpointPath(item.Part.PartNumber);
-            var receipt = new PartReceiptComponent
-            {
-                RunId = item.Part.RunId,
-                PartNumber = item.Part.PartNumber,
-                Files = item.Part.Files,
-                Fingerprint = item.Part.Fingerprint,
-                ArchiveLength = item.Status.ArchiveBytes,
-                ArchiveSha256 = ComputeFileHash(item.Status.LocalArchivePath),
-                IndexLength = File.Exists(indexPath) ? new FileInfo(indexPath).Length : 0,
-                IndexSha256 = File.Exists(indexPath) ? ComputeFileHash(indexPath) : string.Empty
-            };
-            foreach (var entity in storage.Query<BackupPartComponent>())
-            {
-                if (ReferenceEquals(storage.GetComponent<BackupPartComponent>(entity), item.Part))
-                {
-                    storage.SetComponent(entity, receipt);
-                    return;
                 }
             }
         }
@@ -918,46 +893,20 @@ namespace DifferentialBackup.Systems
             IComponentStorage storage)
         {
             var indexPath = _runState.GetPartCheckpointPath(item.Part.PartNumber);
-            foreach (var entity in storage.Query<BackupPartComponent>())
+            storage.SetComponent(item.Entity, new PartReceiptComponent
             {
-                if (!ReferenceEquals(storage.GetComponent<BackupPartComponent>(entity), item.Part))
-                {
-                    continue;
-                }
-
-                storage.SetComponent(entity, new PartReceiptComponent
-                {
-                    RunId = item.Part.RunId,
-                    PartNumber = item.Part.PartNumber,
-                    Files = checkpoint.Files.Count > 0 ? checkpoint.Files : item.Part.Files,
-                    Fingerprint = checkpoint.Fingerprint,
-                    ArchiveLength = checkpoint.ArchiveBytes,
-                    ArchiveSha256 = checkpoint.ArchiveSha256,
-                    IndexLength = File.Exists(indexPath) ? new FileInfo(indexPath).Length : 0,
-                    IndexSha256 = File.Exists(indexPath) ? ComputeFileHash(indexPath) : string.Empty
-                });
-                return;
-            }
+                RunId = item.Part.RunId,
+                PartNumber = item.Part.PartNumber,
+                Files = checkpoint.Files.Count > 0 ? checkpoint.Files : item.Part.Files,
+                Fingerprint = checkpoint.Fingerprint,
+                ArchiveLength = checkpoint.ArchiveBytes,
+                ArchiveSha256 = checkpoint.ArchiveSha256,
+                IndexLength = File.Exists(indexPath) ? new FileInfo(indexPath).Length : 0,
+                IndexSha256 = File.Exists(indexPath) ? ComputeFileHash(indexPath) : string.Empty
+            });
         }
 
-        private static PartReceiptComponent? FindReceipt(BackupPartComponent part, IComponentStorage storage)
-        {
-            foreach (var entity in storage.Query<BackupPartComponent>())
-            {
-                if (ReferenceEquals(storage.GetComponent<BackupPartComponent>(entity), part))
-                {
-                    return storage.GetComponent<PartReceiptComponent>(entity);
-                }
-            }
-
-            return null;
-        }
-
-        private static string ComputeFileHash(string path)
-        {
-            using var stream = File.OpenRead(path);
-            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
-        }
+        private string ComputeFileHash(string path) => _runState.ComputeArtifactHash(path);
 
         private void EnsureLocalStagingCapacity(
             BackupRunComponent run,
@@ -1014,6 +963,7 @@ namespace DifferentialBackup.Systems
         };
 
         private sealed record PartEntity(
+            Entity Entity,
             BackupPartComponent Part,
             BackupPartStatusComponent Status);
 

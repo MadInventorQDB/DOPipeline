@@ -178,7 +178,10 @@ namespace DifferentialBackup
             var storage = new ComponentStorage();
 
             // File paths for persisted data
-            var destinationState = new DestinationStateStore(sourceDirectory, backupDestination);
+            var destinationState = new DestinationStateStore(sourceDirectory, backupDestination)
+            {
+                VerificationLogger = _pipelineLogger
+            };
             var hashesFilePath = destinationState.StatePath;
             var backupDatesFilePath = Path.Combine(backupDestination, DestinationStateStore.FileName);
 

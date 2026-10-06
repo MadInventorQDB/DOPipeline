@@ -177,14 +177,18 @@ namespace DifferentialBackup.Systems
                         };
                         storage.SetComponent(item.Entity, receipt);
                     }
-                    if (receipt != null && !string.IsNullOrWhiteSpace(receipt.ArchiveSha256) &&
-                        (!File.Exists(item.Status.DestinationArchivePath) ||
-                         !string.Equals(receipt.ArchiveSha256, ComputeFileHash(item.Status.DestinationArchivePath), StringComparison.OrdinalIgnoreCase)))
+                    // Operation-driven publication is provisional: the rename and
+                    // job marker do not authorize baseline state or terminal success.
+                    // BackupStateCommitSystem reads the final archive bytes AFTER
+                    // published-job-committed, comparing them with this receipt.
+                    // Direct callers have no commit system and must validate here.
+                    if (operationEntity == null && receipt != null && !string.IsNullOrWhiteSpace(receipt.ArchiveSha256))
                     {
                         var actual = File.Exists(item.Status.DestinationArchivePath)
                             ? ComputeFileHash(item.Status.DestinationArchivePath)
                             : "<missing>";
-                        return Result.Fail($"Backup part checksum validation failed: '{item.Part.ArchiveFileName}' expected {receipt.ArchiveSha256}, actual {actual}.");
+                        if (!string.Equals(receipt.ArchiveSha256, actual, StringComparison.OrdinalIgnoreCase))
+                            return Result.Fail($"Backup part checksum validation failed: '{item.Part.ArchiveFileName}' expected {receipt.ArchiveSha256}, actual {actual}.");
                     }
                 }
 
@@ -395,10 +399,6 @@ namespace DifferentialBackup.Systems
             BackupPartComponent Part,
             BackupPartStatusComponent Status);
 
-        private static string ComputeFileHash(string path)
-        {
-            using var stream = File.OpenRead(path);
-            return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
-        }
+        private string ComputeFileHash(string path) => _runState.ComputeArtifactHash(path);
     }
 }
